@@ -39,9 +39,12 @@ COPY . .
 
 ARG VERSION=dev
 
-# TARGETARCH is supplied by buildx per platform in the manifest (amd64, arm64).
-# It defaults to amd64 so a plain `docker build` with no buildx still works.
-ARG TARGETARCH=amd64
+# TARGETARCH is one of BuildKit's automatic platform arguments: it is filled in
+# per platform in the manifest (amd64, arm64) and MUST be declared with no
+# default. Giving it one turns it into an ordinary build argument, the default
+# wins for every platform, and the arm64 image silently ships an amd64 binary
+# that dies with "exec format error" on the machine it was built for.
+ARG TARGETARCH
 
 # CGO_ENABLED=0 is what makes the binary static, which is what makes the
 # distroless-static runtime stage (and the sub-30MB image) possible.
