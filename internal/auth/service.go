@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,11 @@ const (
 	// hashingQueueTimeout is how long a request waits for a hashing slot before
 	// being turned away.
 	hashingQueueTimeout = 5 * time.Second
+)
+
+var (
+	ErrUsernameEmpty   = errors.New("username must not be empty")
+	ErrUsernameTooLong = fmt.Errorf("username must be at most %d bytes", MaxUsernameLength)
 )
 
 var (
@@ -93,6 +99,21 @@ func (s *Service) withHashingSlot(ctx context.Context, work func() error) error 
 	return work()
 }
 
+// CheckUsernamePolicy rejects a username that could never be used. It must test
+// exactly what Login tests — byte length, not a rune count — because the whole
+// point is that the two agree: a name that passes here and fails there creates
+// an account nobody can ever sign in to, recoverable only by clearing the user
+// rows.
+func CheckUsernamePolicy(username string) error {
+	if strings.TrimSpace(username) == "" {
+		return ErrUsernameEmpty
+	}
+	if len(username) > MaxUsernameLength {
+		return ErrUsernameTooLong
+	}
+	return nil
+}
+
 // EnsureInitialUser seeds the single admin account on first start. The seeded
 // password is marked for immediate change, so the value that sat in the
 // environment stops working as soon as someone signs in.
@@ -106,6 +127,11 @@ func (s *Service) EnsureInitialUser(ctx context.Context, username, password stri
 	}
 	if password == "" {
 		return false, errors.New("no users exist yet and ADMIN_PASSWORD is not set")
+	}
+	// Checked before the account is written rather than discovered at the first
+	// sign-in attempt, when the only way out would be deleting the user rows.
+	if err := CheckUsernamePolicy(username); err != nil {
+		return false, fmt.Errorf("the configured admin username is unusable: %w", err)
 	}
 	hash, err := HashPassword(password)
 	if err != nil {

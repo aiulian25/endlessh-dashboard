@@ -284,7 +284,7 @@ are never written to logs.
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:18222` | Address the HTTP server binds to. Keep the host part empty — `:18222` listens on every interface *inside the container*, which is what lets the published port reach it. Narrowing it to `127.0.0.1:18222` makes the container unreachable from anywhere, including your LAN. Control exposure with the compose `ports:` line instead. |
 | `DATA_DIR` | `/data` | Directory for `endlessh.db` and `backups/`. The only path the app writes to. |
-| `ADMIN_USERNAME` | `admin` | Seed admin account, created on first start only. |
+| `ADMIN_USERNAME` | `admin` | Seed admin account, created on first start only — changing it later does nothing, since it is read only while the account is being created. At most 64 **bytes** (not characters, so accented or non-Latin names reach the limit sooner); longer is refused at startup. Empty or blank falls back to `admin`. |
 | `ADMIN_PASSWORD` | *(required on first start)* | Seed password. Must be changed at first login; ignored once a user row exists. |
 | `SECURE_COOKIES` | `auto` | `auto` marks the session cookie `Secure` when the request arrived over TLS (directly or via `X-Forwarded-Proto`). `on` forces it, `off` disables it for local plain-HTTP testing only. |
 | `SESSION_LIFETIME` | `12h` | How long a sign-in stays valid before you are logged out and asked for the password again. The clock starts at sign-in and does not slide with activity. Go duration string with no day unit — write `168h`, not `7d`. Minimum `1m`, maximum `720h`. |

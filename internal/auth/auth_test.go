@@ -547,3 +547,64 @@ func mustGetUser(t *testing.T, dataStore *store.Store) store.User {
 	}
 	return user
 }
+
+// The defect this guards: MaxUsernameLength was enforced when signing in but
+// not when the account was seeded, so an over-long ADMIN_USERNAME created an
+// account that could never be used. Refusing at creation turns a silent,
+// unrecoverable state into a startup error the operator can act on.
+func TestEnsureInitialUserRefusesAUsernameLoginCouldNeverAccept(t *testing.T) {
+	// A bare service: EnsureInitialUser is a no-op once any user exists, so the
+	// database has to be empty for the seeding path to run at all.
+	ctx := context.Background()
+	dataStore := newTestStore(t)
+	service := NewService(dataStore, time.Hour)
+
+	tooLong := strings.Repeat("a", MaxUsernameLength+1)
+	created, err := service.EnsureInitialUser(ctx, tooLong, "seed-password-1")
+	if err == nil {
+		t.Fatal("an over-long username was accepted, so the account would exist but never sign in")
+	}
+	if created {
+		t.Error("EnsureInitialUser reported creating an account it rejected")
+	}
+	if count, countErr := dataStore.CountUsers(ctx); countErr != nil || count != 0 {
+		t.Errorf("users after a refused seed = %d (err %v), want none written", count, countErr)
+	}
+
+	// Exactly at the limit is usable, so the guard rejects only what Login would.
+	atLimit := strings.Repeat("a", MaxUsernameLength)
+	if _, err := service.EnsureInitialUser(ctx, atLimit, "seed-password-1"); err != nil {
+		t.Fatalf("a username of exactly %d bytes was refused: %v", MaxUsernameLength, err)
+	}
+	if _, _, _, err := service.Login(ctx, atLimit, "seed-password-1", "test"); err != nil {
+		t.Errorf("the account just created cannot sign in: %v", err)
+	}
+}
+
+// Login measures bytes, so this must too. A rune-count check would pass a name
+// of 40 multi-byte characters at creation and then reject it at sign-in — the
+// same unusable account, reached by a subtler route.
+func TestUsernamePolicyMeasuresTheSameLengthLoginDoes(t *testing.T) {
+	// 40 runes, 120 bytes: comfortably under a 64-rune limit, over a 64-byte one.
+	multiByte := strings.Repeat("é", 40)
+	if len([]rune(multiByte)) > MaxUsernameLength {
+		t.Fatalf("fixture is %d runes, which is not under the limit", len([]rune(multiByte)))
+	}
+	if len(multiByte) <= MaxUsernameLength {
+		t.Fatalf("fixture is %d bytes, which is not over the limit", len(multiByte))
+	}
+	if err := CheckUsernamePolicy(multiByte); err == nil {
+		t.Error("a username Login would refuse on byte length was accepted at creation")
+	}
+}
+
+func TestUsernamePolicyRejectsEmptyAndBlank(t *testing.T) {
+	for _, blank := range []string{"", "   ", "\t\n"} {
+		if err := CheckUsernamePolicy(blank); err == nil {
+			t.Errorf("CheckUsernamePolicy(%q) = nil, want it refused", blank)
+		}
+	}
+	if err := CheckUsernamePolicy("admin"); err != nil {
+		t.Errorf("CheckUsernamePolicy(\"admin\") = %v, want nil", err)
+	}
+}
