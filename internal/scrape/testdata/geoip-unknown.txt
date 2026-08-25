@@ -1,0 +1,14 @@
+# GeoIP is switched on but the lookup failed for this address, so endlessh-go
+# falls back to the "Unknown"/"s000" placeholders instead of a real location.
+# HELP endlessh_client_open_count Number of connections of clients.
+# TYPE endlessh_client_open_count counter
+endlessh_client_open_count{country="Unknown",geohash="s000",ip="10.11.12.13",local_port="22",location="Unknown"} 3
+# HELP endlessh_client_open_count_total Total number of clients that tried to connect to this host.
+# TYPE endlessh_client_open_count_total counter
+endlessh_client_open_count_total{local_port="22"} 3
+# HELP endlessh_client_trapped_time_seconds Seconds a client spends on endlessh.
+# TYPE endlessh_client_trapped_time_seconds counter
+endlessh_client_trapped_time_seconds{ip="10.11.12.13",local_port="22"} 12.5
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 10

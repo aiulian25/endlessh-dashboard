@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'">
+  <meta name="color-scheme" content="dark light">
+  <title>Endlessh Dashboard</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="logo.png">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#view">Skip to content</a>
+
+  <div id="boot" class="boot">
+    <img class="boot-logo" src="logo.png" width="64" height="64" alt="">
+    <p class="boot-text">Loading Endlessh Dashboard…</p>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <button type="button" class="icon-btn drawer-btn" id="drawer-btn" aria-label="Show machines" aria-expanded="false" aria-controls="sidebar"></button>
+
+      <a class="wordmark" href="#/overview">
+        <img class="wordmark-logo" src="logo.png" width="28" height="28" alt="">
+        <span class="wordmark-strong">Endlessh</span><span class="wordmark-soft">Dashboard</span>
+      </a>
+
+      <nav class="nav" id="nav" aria-label="Primary">
+        <a class="nav-link" href="#/overview" data-route="overview">Overview</a>
+        <a class="nav-link" href="#/machines" data-route="machines">Machines</a>
+        <a class="nav-link" href="#/attackers" data-route="attackers">Attackers</a>
+        <a class="nav-link" href="#/backups" data-route="backups">Backups</a>
+        <a class="nav-link" href="#/settings" data-route="settings">Settings</a>
+      </nav>
+
+      <div class="topbar-tools">
+        <button type="button" class="icon-btn" id="logout-btn" aria-label="Log out"></button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar" id="sidebar" aria-labelledby="side-label">
+        <div class="side-head">
+          <span class="side-label" id="side-label">Machines</span>
+          <span class="side-count" id="side-count"></span>
+        </div>
+
+        <div class="seg side-bulk" role="group" aria-label="Select machines">
+          <button type="button" id="side-all" aria-pressed="false">All</button>
+          <button type="button" id="side-none" aria-pressed="false">None</button>
+        </div>
+
+        <div class="side-list" id="side-list"></div>
+      </aside>
+
+      <main id="view" class="view view-main" tabindex="-1"></main>
+    </div>
+
+    <div class="scrim" id="scrim" aria-hidden="true" hidden></div>
+  </div>
+
+  <section id="auth" class="auth" hidden aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="wordmark auth-wordmark">
+        <img class="wordmark-logo auth-logo" src="logo.png" width="56" height="56" alt="">
+        <span class="auth-name"><span class="wordmark-strong">Endlessh</span> <span class="wordmark-soft">Dashboard</span></span>
+      </div>
+
+      <form id="login-form" class="auth-form" novalidate>
+        <h1 class="auth-title" id="auth-title">Sign in</h1>
+        <div class="field">
+          <label for="login-user">Username</label>
+          <input class="input" id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label for="login-pass">Password</label>
+          <input class="input" id="login-pass" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <p class="form-error" id="login-error" role="alert" hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      </form>
+
+      <form id="force-form" class="auth-form" novalidate hidden>
+        <h1 class="auth-title">Choose a new password</h1>
+        <p class="auth-sub">This account still uses its initial password. Set a new one to continue.</p>
+        <div class="field">
+          <label for="force-current">Current password</label>
+          <input class="input" id="force-current" name="current_password" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label for="force-new">New password</label>
+          <input class="input" id="force-new" name="new_password" type="password" autocomplete="new-password" required>
+        </div>
+        <div class="field">
+          <label for="force-confirm">Repeat new password</label>
+          <input class="input" id="force-confirm" name="confirm_password" type="password" autocomplete="new-password" required>
+        </div>
+        <p class="form-error" id="force-error" role="alert" hidden></p>
+        <button class="btn btn-primary btn-block" type="submit">Save password</button>
+      </form>
+    </div>
+  </section>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="sr-only" id="live" role="status" aria-live="polite" aria-atomic="true"></div>
+  <dialog class="modal" id="modal" aria-labelledby="modal-title"></dialog>
+</body>
+</html>

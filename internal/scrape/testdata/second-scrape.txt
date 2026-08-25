@@ -1,0 +1,39 @@
+# The same instance as normal.txt, scraped again one minute later. 45.155.205.233
+# and 92.63.197.55 kept knocking; 218.92.0.204 gave up and its counters stand still.
+# HELP endlessh_client_closed_count_total Total number of clients that stopped connecting to this host.
+# TYPE endlessh_client_closed_count_total counter
+endlessh_client_closed_count_total{local_port="22"} 1201
+endlessh_client_closed_count_total{local_port="2222"} 304
+# HELP endlessh_client_open_count Number of connections of clients.
+# TYPE endlessh_client_open_count counter
+endlessh_client_open_count{country="Germany",geohash="u0yjjd6",ip="45.155.205.233",local_port="22",location="Germany, Hesse, Frankfurt am Main"} 95
+endlessh_client_open_count{country="Germany",geohash="u0yjjd6",ip="45.155.205.233",local_port="2222",location="Germany, Hesse, Frankfurt am Main"} 18
+endlessh_client_open_count{country="China",geohash="wtw3sjq",ip="218.92.0.204",local_port="22",location="China, Jiangsu, Nanjing"} 512
+endlessh_client_open_count{country="Russia",geohash="ucfv0j4",ip="92.63.197.55",local_port="2222",location="Russia, Moscow"} 46
+# HELP endlessh_client_open_count_total Total number of clients that tried to connect to this host.
+# TYPE endlessh_client_open_count_total counter
+endlessh_client_open_count_total{local_port="22"} 1240
+endlessh_client_open_count_total{local_port="2222"} 315
+# HELP endlessh_client_trapped_time_seconds Seconds a client spends on endlessh.
+# TYPE endlessh_client_trapped_time_seconds counter
+endlessh_client_trapped_time_seconds{ip="45.155.205.233",local_port="22"} 3900.75
+endlessh_client_trapped_time_seconds{ip="45.155.205.233",local_port="2222"} 450.25
+endlessh_client_trapped_time_seconds{ip="218.92.0.204",local_port="22"} 18400
+endlessh_client_trapped_time_seconds{ip="92.63.197.55",local_port="2222"} 727.75
+# HELP endlessh_sent_bytes_total Total bytes sent to clients that tried to connect to this host.
+# TYPE endlessh_sent_bytes_total counter
+endlessh_sent_bytes_total{local_port="22"} 4850000
+endlessh_sent_bytes_total{local_port="2222"} 995000
+# HELP endlessh_trapped_time_seconds_total Total seconds clients spent on endlessh.
+# TYPE endlessh_trapped_time_seconds_total counter
+endlessh_trapped_time_seconds_total{local_port="22"} 91500.75
+endlessh_trapped_time_seconds_total{local_port="2222"} 20200.5
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 27
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 41.55
+# HELP promhttp_metric_handler_requests_total Total number of scrapes by HTTP status code.
+# TYPE promhttp_metric_handler_requests_total counter
+promhttp_metric_handler_requests_total{code="200"} 4472

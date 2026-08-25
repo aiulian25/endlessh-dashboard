@@ -1,0 +1,58 @@
+# Keeps the build context small and keeps local secrets and local databases
+# out of the image entirely.
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Secrets and local runtime state. Never bake a real config or database into
+# an image.
+.env
+.env.*
+!.env.example
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+
+# End-to-end harness: it runs against the built image, it is not part of it.
+e2e/
+
+# Test and build output
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.out
+*.prof
+
+# Docs. Nothing under *.md is embedded in the binary; only web/ is.
+# If a markdown file ever becomes a go:embed asset, un-ignore it here.
+*.md
+docs/
+LICENSE
+
+# A GeoIP database is mounted at runtime, never baked into the image: it is
+# licensed to whoever downloaded it and must not be redistributed.
+*.mmdb
+
+# Container and build tooling: not needed inside the build.
+Dockerfile
+.dockerignore
+docker-compose.dev.yml
+docker-compose.*.yml
+Makefile
+
+# Editor and OS cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Master artwork: only the resized copies under web/ are embedded
+assets/

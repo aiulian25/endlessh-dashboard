@@ -1,0 +1,72 @@
+# endlessh-dashboard — pull and run. No build, no database container, no sidecar.
+#
+#   1. curl -O https://raw.githubusercontent.com/aiulian25/endlessh-dashboard/main/.env.example
+#   2. mv .env.example .env   and set ADMIN_PASSWORD
+#   3. docker compose up -d
+#   4. open http://<this-host>:18222
+#
+# TLS: this service speaks plain HTTP and expects TLS to be terminated by a
+# reverse proxy in front of it. Do not publish port 18222 straight to the
+# internet.
+
+services:
+  dashboard:
+    image: ghcr.io/aiulian25/endlessh-dashboard:latest
+    container_name: endlessh-dashboard
+    restart: unless-stopped
+
+    # All configuration is environment-driven. See .env.example for every
+    # variable and what it does.
+    env_file: .env
+
+    ports:
+      # Reachable from your LAN. The session cookie travels unencrypted over
+      # plain HTTP, so put a TLS-terminating proxy in front before this leaves
+      # your network — and bind to loopback if you do:
+      #   - "127.0.0.1:18222:18222"
+      - "18222:18222"
+
+    # ---- Hardening ---------------------------------------------------------
+    # The image runs as the distroless `nonroot` user (uid 65532) already, so
+    # no `user:` override is needed.
+
+    # Immutable root filesystem: the process can only write to the paths listed
+    # under volumes: and tmpfs: below.
+    read_only: true
+
+    # It binds a port above 1024 and writes one directory. It needs no Linux
+    # capabilities at all.
+    cap_drop:
+      - ALL
+
+    security_opt:
+      # Blocks setuid binaries and other escalation paths inside the container.
+      - no-new-privileges:true
+
+    volumes:
+      # The single writable path: holds endlessh.db and /data/backups.
+      # A named volume survives `docker compose down` and image upgrades.
+      - endlessh-data:/data
+
+      # Optional offline GeoIP. Mount a MaxMind GeoLite2 database read-only and
+      # point GEOIP_MMDB_PATH at it in .env. Lookups stay on this host.
+      #
+      # - ./GeoLite2-City.mmdb:/geoip/GeoLite2-City.mmdb:ro
+
+    tmpfs:
+      # SQLite spills temporary files while taking a backup, and a read-only
+      # root leaves it nowhere to put them. In memory, small, and mounted so it
+      # cannot be used to stage a binary.
+      - /tmp:rw,noexec,nosuid,size=32m
+
+    healthcheck:
+      # The runtime image is distroless — no shell, no curl, no wget — so the
+      # probe is the binary asking itself.
+      test: ["CMD", "/usr/local/bin/endlessh-dashboard", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  endlessh-data:

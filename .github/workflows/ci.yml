@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+  BINARY: endlessh-dashboard
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build static binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${GITHUB_SHA}" \
+            -o bin/${BINARY} \
+            ./cmd/${BINARY}
+
+      # CGO_ENABLED=0 is the prerequisite for the distroless-static runtime
+      # image. If a dependency ever drags cgo back in, the image breaks at
+      # runtime rather than at build time, so assert it here.
+      - name: Assert the binary is statically linked
+        run: |
+          file "bin/${BINARY}"
+          if ! file "bin/${BINARY}" | grep -qE 'statically linked|static-pie'; then
+            echo "::error::bin/${BINARY} is not statically linked"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./... -race
+
+  vuln:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        run: govulncheck ./...
+
+  docker:
+    name: Image build and size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # NOTE: the Dockerfile pins both base images by digest. Until those
+      # placeholder digests are replaced with real ones, this job fails at the
+      # pull step. See the comment block at the top of the Dockerfile.
+      - name: Build image
+        run: docker build --build-arg VERSION="${GITHUB_SHA}" -t "${BINARY}:ci" .
+
+      # "image under 30MB" is a stated acceptance criterion, so it is a gate,
+      # not a report.
+      - name: Assert image is under 30MB
+        run: |
+          MAX_BYTES=$((30 * 1024 * 1024))
+          SIZE_BYTES=$(docker image inspect "${BINARY}:ci" --format '{{.Size}}')
+          echo "image size: ${SIZE_BYTES} bytes (limit ${MAX_BYTES})"
+          if [ "${SIZE_BYTES}" -ge "${MAX_BYTES}" ]; then
+            echo "::error::image is ${SIZE_BYTES} bytes, over the 30MB limit"
+            exit 1
+          fi

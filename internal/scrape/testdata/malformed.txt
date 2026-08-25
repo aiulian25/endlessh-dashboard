@@ -1,0 +1,4 @@
+# HELP endlessh_client_open_count_total Total number of clients that tried to connect to this host.
+# TYPE endlessh_client_open_count_total counter
+endlessh_client_open_count_total{local_port="22" 1204
+endlessh_client_open_count_total{local_port=2222} not_a_number

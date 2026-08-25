@@ -1,0 +1,53 @@
+# Real configuration: .env holds ADMIN_PASSWORD. Only the example is tracked.
+.env
+.env.*
+!.env.example
+
+# docker-compose.yml — pull-only, no secrets — is the one and only compose file
+# that ships. The dev stack builds from a checkout and the prod stack holds the
+# operator's own paths, ports and secrets; neither belongs in a public repo.
+docker-compose.dev.yml
+docker-compose.prod.yml
+docker-compose.local.yml
+docker-compose.override.yml
+
+# Release and working notes. Not part of the product.
+docs/Push.md
+CODE_REVIEW_REPORT.md
+NOTES.md
+TODO.md
+scratch/
+*.scratch
+*.bak
+*.orig
+
+# Local data and backups
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.db.restore
+*.db.restore.rejected
+
+# A GeoIP database is licensed to whoever downloaded it and is never
+# redistributed with this project.
+*.mmdb
+
+# Build and test output
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.out
+*.prof
+
+# Editor and OS cruft
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
