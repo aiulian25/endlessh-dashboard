@@ -32,21 +32,21 @@ func TestTestMachineReportsAReachableTarget(t *testing.T) {
 	testHarness := newSignedInHarness(t)
 	testHarness.prober.err = nil
 	testHarness.prober.summary = scrape.ProbeSummary{
-		Address:    "192.168.1.23:2112",
+		Address:    "192.168.1.10:2112",
 		Clients:    3,
 		LocalPorts: []string{"2222"},
 	}
 
 	answer := testHarness.request(http.MethodPost, "/api/machines/test",
-		map[string]any{"host": "192.168.1.23", "port": 2112, "metrics_path": "/metrics"})
+		map[string]any{"host": "192.168.1.10", "port": 2112, "metrics_path": "/metrics"})
 	assertStatus(t, "probe a reachable target", answer, http.StatusOK)
 
 	var payload probeResponse
 	answer.decode(t, &payload)
-	if payload.Clients != 3 || payload.Address != "192.168.1.23:2112" {
+	if payload.Clients != 3 || payload.Address != "192.168.1.10:2112" {
 		t.Errorf("probe response = %+v, want the summary the prober returned", payload)
 	}
-	for _, fragment := range []string{"Reached endlessh-go", "192.168.1.23:2112", "2222", "3 attackers"} {
+	for _, fragment := range []string{"Reached endlessh-go", "192.168.1.10:2112", "2222", "3 attackers"} {
 		if !strings.Contains(payload.Message, fragment) {
 			t.Errorf("message %q does not mention %q", payload.Message, fragment)
 		}
