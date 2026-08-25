@@ -1,5 +1,6 @@
-/* Settings page: password change, theme preference, geography sources and the
-   read-only effective configuration. */
+/* Settings page: everything you manage rather than watch — password, theme,
+   backups, and the read-only view of the geography sources and effective
+   configuration the container actually loaded. */
 
 import {
   api, esc, toast, renderError, fmtShortDuration, fmtNumber,
@@ -7,6 +8,7 @@ import {
   THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
   signOutAfterPasswordChange,
 } from './app.js';
+import { renderBackups } from './backups.js';
 
 const THEME_OPTIONS = [
   { value: THEME_SYSTEM, label: 'System' },
@@ -118,6 +120,7 @@ export async function render(mount) {
     </div>
     ${passwordCard()}
     ${themeCard()}
+    <div id="backups-host"></div>
     <div id="geo-card">
       <div class="card"><div class="card-pad"><div class="skeleton w60"></div></div></div>
     </div>
@@ -175,6 +178,10 @@ export async function render(mount) {
       button.disabled = false;
     }
   });
+
+  // Backups own their loading and error handling, so this is fired off rather
+  // than awaited: a slow listing must not hold up the rest of the page.
+  renderBackups(mount.querySelector('#backups-host'));
 
   const configCard = mount.querySelector('#config-card');
   const geoCard = mount.querySelector('#geo-card');

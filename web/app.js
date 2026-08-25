@@ -28,9 +28,14 @@ const PAGES = {
   overview: () => import('./overview.js'),
   machines: () => import('./machines.js'),
   attackers: () => import('./attackers.js'),
-  backups: () => import('./backups.js'),
   settings: () => import('./settings.js'),
 };
+
+// Routes that no longer exist, and where they went. #/backups was a page in its
+// own right until backups moved onto the settings page; a bookmark or an old
+// link should land where the feature actually lives rather than silently
+// falling back to the overview.
+const MOVED_ROUTES = { backups: 'settings' };
 
 /* ---------------- utilities ---------------- */
 
@@ -642,6 +647,14 @@ export function navigate(hash) {
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
   const parts = raw.split('/').filter(Boolean);
+  if (parts.length && MOVED_ROUTES[parts[0]]) {
+    const moved = MOVED_ROUTES[parts[0]];
+    // Rewrite the address rather than only resolving it, so a stale bookmark
+    // corrects itself and the URL never disagrees with the page on screen.
+    // replaceState keeps it out of the history, so Back still goes back.
+    history.replaceState(null, '', `#/${moved}`);
+    return { name: moved, param: null };
+  }
   if (parts.length && !PAGES[parts[0]]) {
     // An in-page anchor such as the skip link, not a route. Stay on the current
     // page rather than throwing the user back to the default one.

@@ -511,7 +511,8 @@ Backups are taken with SQLite's own `VACUUM INTO`, never a raw file copy, so a b
 the scraper is writing is still consistent. Files land in `/data/backups/`, so they are on the same
 volume as the database — copy them off-host if you want them to survive losing the volume.
 
-From the **Backups** page you can take a backup, download it, restore one, and delete one. Daily
+From the **Backups** card on the **Settings** page you can take a backup, download it, restore one,
+and delete one. Daily
 backups run automatically when `BACKUP_DAILY=true`, keeping the last `BACKUP_KEEP_LAST`
 files.
 
@@ -656,7 +657,7 @@ The volume is named after the directory you ran `docker compose up` in, so subst
 `docker volume ls` reported above. If you swapped the named volume for a bind mount, use
 `-v "$PWD/data:/data"` instead.
 
-Take a backup before doing this if the data matters to you — the **Backups** page has a
+Take a backup before doing this if the data matters to you — **Settings → Backups** has a
 **Back up now** button, and the file can be downloaded from there.
 
 ### GeoIP labels are empty
@@ -692,7 +693,7 @@ image: ghcr.io/aiulian25/endlessh-dashboard:1.0.0
 ```
 
 The database is migrated forward automatically on start, and every migration so far is additive.
-Take a backup before a major-version upgrade anyway — the **Backups** page makes it one click, and
+Take a backup before a major-version upgrade anyway — **Settings → Backups** makes it one click, and
 restoring is one more.
 
 ## Credits

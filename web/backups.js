@@ -1,5 +1,8 @@
-/* Backups page: list, create, download, upload, restore and delete database
-   snapshots. */
+/* Backups: list, create, download, upload, restore and delete database
+   snapshots. Rendered as a card inside Settings rather than as a page of its
+   own — backing up is something you set up once and then leave alone, which
+   belongs with the other things you manage rather than in the primary nav
+   beside the pages you actually watch. */
 
 import {
   api, esc, icon, toast, onRefresh, renderError, emptyState, confirmModal,
@@ -31,21 +34,27 @@ function backupRow(backup) {
     </tr>`;
 }
 
-export async function render(mount) {
-  mount.innerHTML = `
-    <div class="page-head">
-      <h1 class="page-title">Backups</h1>
-      <button type="button" class="btn" id="backup-upload">${icon('upload', 16)} Restore from file</button>
-      <button type="button" class="btn btn-primary" id="backup-now">${icon('archive', 16)} Back up now</button>
+// renderBackups fills the host element with the whole backups section. It owns
+// its own loading, so the caller only has to give it somewhere to live.
+export async function renderBackups(host) {
+  host.innerHTML = `
+    <div class="card" id="backups-card">
+      <div class="card-head">
+        <h2 class="card-title">Backups</h2>
+        <span class="card-actions">
+          <button type="button" class="btn btn-sm" id="backup-upload">${icon('upload', 15)} Restore from file</button>
+          <button type="button" class="btn btn-sm btn-primary" id="backup-now">${icon('archive', 15)} Back up now</button>
+        </span>
+      </div>
+      <div id="backups-body">
+        <div class="card-pad"><div class="skeleton w60"></div></div>
+      </div>
     </div>
     <input type="file" id="backup-file" class="sr-only" accept="${BACKUP_FILE_EXTENSION}"
-           tabindex="-1" aria-hidden="true">
-    <p class="page-sub">Snapshots of the dashboard database: machines, collected history and settings.</p>
-    <div class="card" id="backups-card">
-      <div class="card-pad"><div class="skeleton w60"></div></div>
-    </div>`;
+           tabindex="-1" aria-hidden="true">`;
 
-  const card = mount.querySelector('#backups-card');
+  const mount = host;
+  const card = mount.querySelector('#backups-body');
   const createButton = mount.querySelector('#backup-now');
   const uploadButton = mount.querySelector('#backup-upload');
   const fileInput = mount.querySelector('#backup-file');

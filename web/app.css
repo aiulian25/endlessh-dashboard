@@ -464,6 +464,16 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .card-head + .table-wrap { border-top: 1px solid var(--border-soft); }
 .card-head.flush { padding: 0 0 8px; }
 
+/* Actions sitting in a card head. .card-title takes the free space, so these
+   are pushed to the trailing edge; they wrap under it rather than overflowing
+   when the card is narrow or the labels are long. */
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .card-title {
   font-size: 16px;
   font-weight: 700;
