@@ -22,6 +22,7 @@ const (
 	EnvAdminUsername        = "ADMIN_USERNAME"
 	EnvAdminPassword        = "ADMIN_PASSWORD"
 	EnvSecureCookies        = "SECURE_COOKIES"
+	EnvSessionLifetime      = "SESSION_LIFETIME"
 	EnvGeoIPDatabasePath    = "GEOIP_MMDB_PATH"
 	EnvGeoIPOnline          = "GEOIP_ONLINE"
 	EnvGeoIPOnlineRate      = "GEOIP_ONLINE_RATE_PER_MINUTE"
@@ -41,8 +42,15 @@ const (
 	defaultAdminUsername  = "admin"
 	defaultBackupKeepLast = 7
 
-	databaseFileName  = "endlessh.db"
-	backupDirName     = "backups"
+	databaseFileName = "endlessh.db"
+	backupDirName    = "backups"
+	// A session shorter than a minute would log the operator out mid-task, and
+	// one longer than a month is a credential in all but name: a stolen cookie
+	// stays useful for as long as the session lives.
+	defaultSessionLifetime = 12 * time.Hour
+	minSessionLifetime     = time.Minute
+	maxSessionLifetime     = 30 * 24 * time.Hour
+
 	minScrapeInterval = time.Second
 	minScrapeTimeout  = 100 * time.Millisecond
 	minRetentionDays  = 1
@@ -60,9 +68,6 @@ const (
 	httpScheme  = "http"
 	httpsScheme = "https"
 )
-
-// SessionLifetime bounds how long a login stays valid before re-authentication.
-const SessionLifetime = 12 * time.Hour
 
 // SecureCookieMode decides whether session cookies carry the Secure attribute.
 type SecureCookieMode string
@@ -85,6 +90,7 @@ type Config struct {
 	ScrapeTimeout     time.Duration
 	RetentionDays     int
 	AdminUsername     string
+	SessionLifetime   time.Duration
 	AdminPassword     string
 	SecureCookies     SecureCookieMode
 	GeoIPDatabasePath string
@@ -122,6 +128,18 @@ func Load() (*Config, error) {
 		AdminPassword:     os.Getenv(EnvAdminPassword),
 		GeoIPDatabasePath: os.Getenv(EnvGeoIPDatabasePath),
 	}
+
+	// How long a login stays valid. The clock starts at sign-in and does not
+	// slide with activity: the session ends at its expiry whatever the operator
+	// is doing, which is the point of a bounded session.
+	sessionLifetime, err := durationValue(EnvSessionLifetime, defaultSessionLifetime)
+	if err != nil {
+		return nil, err
+	}
+	if sessionLifetime < minSessionLifetime || sessionLifetime > maxSessionLifetime {
+		return nil, fmt.Errorf("%s must be between %s and %s", EnvSessionLifetime, minSessionLifetime, maxSessionLifetime)
+	}
+	config.SessionLifetime = sessionLifetime
 
 	scrapeInterval, err := durationValue(EnvScrapeInterval, defaultScrapeInterval)
 	if err != nil {

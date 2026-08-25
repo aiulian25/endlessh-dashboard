@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"endlessh-dashboard/internal/geo"
 )
@@ -97,5 +98,50 @@ func TestOnlineGeoIPValidation(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, testCase.wantErrText)
 			}
 		})
+	}
+}
+
+func TestSessionLifetimeIsConfigurableAndBounded(t *testing.T) {
+	t.Setenv(EnvAdminPassword, "seed-password-1")
+
+	// Unset means the documented default, so an install that never heard of
+	// this variable keeps the behaviour it already had.
+	unset, err := Load()
+	if err != nil {
+		t.Fatalf("Load with no %s: %v", EnvSessionLifetime, err)
+	}
+	if unset.SessionLifetime != 12*time.Hour {
+		t.Errorf("default session lifetime = %s, want 12h", unset.SessionLifetime)
+	}
+
+	t.Setenv(EnvSessionLifetime, "45m")
+	shortened, err := Load()
+	if err != nil {
+		t.Fatalf("Load with %s=45m: %v", EnvSessionLifetime, err)
+	}
+	if shortened.SessionLifetime != 45*time.Minute {
+		t.Errorf("session lifetime = %s, want 45m", shortened.SessionLifetime)
+	}
+
+	// The bounds exist to stop two different footguns: a session so short it
+	// logs you out mid-task, and one so long the cookie is a standing
+	// credential. Both are refused at startup rather than silently accepted.
+	for _, refused := range []string{"30s", "721h", "0s", "-1h"} {
+		t.Setenv(EnvSessionLifetime, refused)
+		if _, err := Load(); err == nil {
+			t.Errorf("%s=%s was accepted, want it refused", EnvSessionLifetime, refused)
+		}
+	}
+
+	// Go's duration parser has no day unit, so "7d" is not a short week — it is
+	// a syntax error. Worth pinning, because it is the spelling people reach for.
+	t.Setenv(EnvSessionLifetime, "7d")
+	if _, err := Load(); err == nil {
+		t.Errorf("%s=7d was accepted; Go durations have no day unit", EnvSessionLifetime)
+	}
+
+	t.Setenv(EnvSessionLifetime, "not-a-duration")
+	if _, err := Load(); err == nil {
+		t.Errorf("%s=not-a-duration was accepted, want a parse error", EnvSessionLifetime)
 	}
 }

@@ -115,6 +115,9 @@ RETENTION_DAYS=90
 # arrived over TLS, directly or through a proxy — right for both cases.
 SECURE_COOKIES=auto
 
+# Log out and ask for the password again this long after signing in.
+SESSION_LIFETIME=12h
+
 # Nightly backups into /data/backups, and how many to keep.
 BACKUP_DAILY=false
 BACKUP_KEEP_LAST=7
@@ -284,6 +287,7 @@ are never written to logs.
 | `ADMIN_USERNAME` | `admin` | Seed admin account, created on first start only. |
 | `ADMIN_PASSWORD` | *(required on first start)* | Seed password. Must be changed at first login; ignored once a user row exists. |
 | `SECURE_COOKIES` | `auto` | `auto` marks the session cookie `Secure` when the request arrived over TLS (directly or via `X-Forwarded-Proto`). `on` forces it, `off` disables it for local plain-HTTP testing only. |
+| `SESSION_LIFETIME` | `12h` | How long a sign-in stays valid before you are logged out and asked for the password again. The clock starts at sign-in and does not slide with activity. Go duration string with no day unit — write `168h`, not `7d`. Minimum `1m`, maximum `720h`. |
 | `SCRAPE_INTERVAL` | `15s` | How often each enabled machine is polled. Go duration string. |
 | `SCRAPE_TIMEOUT` | `5s` | Total per-scrape timeout (2s connect). Redirects are never followed. |
 | `SCRAPE_BLOCK_PRIVATE` | `false` | When `true`, refuse RFC1918 / ULA scrape targets as well (see Security posture). |

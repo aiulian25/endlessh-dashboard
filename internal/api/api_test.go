@@ -88,14 +88,15 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	directory := t.TempDir()
 	configuration := &config.Config{
-		DataDirectory:  directory,
-		ScrapeInterval: testScrapeInterval,
-		ScrapeTimeout:  5 * time.Second,
-		RetentionDays:  90,
-		AdminUsername:  seedUsername,
-		AdminPassword:  seedPassword,
-		SecureCookies:  config.SecureCookieAuto,
-		BackupKeepLast: 7,
+		DataDirectory:   directory,
+		ScrapeInterval:  testScrapeInterval,
+		ScrapeTimeout:   5 * time.Second,
+		RetentionDays:   90,
+		AdminUsername:   seedUsername,
+		AdminPassword:   seedPassword,
+		SecureCookies:   config.SecureCookieAuto,
+		BackupKeepLast:  7,
+		SessionLifetime: 12 * time.Hour,
 	}
 
 	dataStore, err := store.Open(configuration.DatabasePath())
@@ -107,7 +108,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("migrate store: %v", err)
 	}
 
-	authService := auth.NewService(dataStore, config.SessionLifetime)
+	authService := auth.NewService(dataStore, configuration.SessionLifetime)
 	created, err := authService.EnsureInitialUser(context.Background(), seedUsername, seedPassword)
 	if err != nil {
 		t.Fatalf("seed the admin account: %v", err)
@@ -1211,6 +1212,7 @@ func TestSettingsNeverLeakSecrets(t *testing.T) {
 	assertStatus(t, "GET /api/settings", answer, http.StatusOK)
 	assertJSONKeys(t, "GET /api/settings", answer.body,
 		"scrape_interval_seconds", "scrape_timeout_seconds", "retention_days",
+		"session_lifetime_seconds",
 		"geoip_enabled", "geoip_source", "geoip_online_enabled", "geoip_online_rate_per_minute",
 		"backup_keep_last", "backup_daily_enabled", "block_private", "version")
 
@@ -1305,5 +1307,43 @@ func TestStaticHandlerServesTheEmbeddedShell(t *testing.T) {
 	assertStatus(t, "GET /app.js", asset, http.StatusOK)
 	if len(asset.body) == 0 {
 		t.Fatal("GET /app.js served an empty file")
+	}
+}
+
+// The auto-logout contract, end to end: the lifetime the operator configured is
+// what the session is given, what the browser is told, and what the settings
+// page reports. A cookie outliving its session would leave the browser sending
+// a dead token; a cookie dying first would log someone out early.
+func TestSessionLifetimeReachesTheCookieAndTheSettingsPage(t *testing.T) {
+	testHarness := newHarness(t)
+	const configured = 12 * time.Hour
+
+	before := time.Now().UTC()
+	answer := testHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword), nil)
+	assertStatus(t, "POST /api/login", answer, http.StatusOK)
+
+	cookie := answer.sessionCookie(t)
+	if cookie.Expires.IsZero() {
+		t.Fatal("the session cookie is a session cookie with no expiry, so it would outlive the server-side session")
+	}
+	// A second either side of the configured window, to absorb the time the
+	// request itself took rather than pinning an exact instant.
+	lived := cookie.Expires.Sub(before)
+	if lived < configured-2*time.Second || lived > configured+2*time.Second {
+		t.Errorf("cookie expires %s after login, want the configured %s", lived, configured)
+	}
+
+	testHarness.logIn(seedPassword)
+	testHarness.changePassword(seedPassword, replacementPassword)
+	testHarness.logIn(replacementPassword)
+
+	settings := testHarness.request(http.MethodGet, "/api/settings", nil)
+	assertStatus(t, "GET /api/settings", settings, http.StatusOK)
+	var effective struct {
+		SessionLifetimeSeconds int `json:"session_lifetime_seconds"`
+	}
+	settings.decode(t, &effective)
+	if effective.SessionLifetimeSeconds != int(configured.Seconds()) {
+		t.Errorf("settings report a %ds session, want %d", effective.SessionLifetimeSeconds, int(configured.Seconds()))
 	}
 }

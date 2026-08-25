@@ -3,11 +3,12 @@ package api
 import "net/http"
 
 type settingsResponse struct {
-	ScrapeIntervalSeconds int    `json:"scrape_interval_seconds"`
-	ScrapeTimeoutSeconds  int    `json:"scrape_timeout_seconds"`
-	RetentionDays         int    `json:"retention_days"`
-	GeoIPEnabled          bool   `json:"geoip_enabled"`
-	GeoIPSource           string `json:"geoip_source"`
+	ScrapeIntervalSeconds  int    `json:"scrape_interval_seconds"`
+	ScrapeTimeoutSeconds   int    `json:"scrape_timeout_seconds"`
+	RetentionDays          int    `json:"retention_days"`
+	SessionLifetimeSeconds int    `json:"session_lifetime_seconds"`
+	GeoIPEnabled           bool   `json:"geoip_enabled"`
+	GeoIPSource            string `json:"geoip_source"`
 	// The online provider is the one thing here that leaves the host, so the UI
 	// gets to state plainly whether it is on and how hard it is allowed to poll.
 	GeoIPOnlineEnabled       bool   `json:"geoip_online_enabled"`
@@ -26,6 +27,7 @@ func (s *Server) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 		ScrapeIntervalSeconds:    int(s.config.ScrapeInterval.Seconds()),
 		ScrapeTimeoutSeconds:     int(s.config.ScrapeTimeout.Seconds()),
 		RetentionDays:            s.config.RetentionDays,
+		SessionLifetimeSeconds:   int(s.config.SessionLifetime.Seconds()),
 		GeoIPEnabled:             s.geoResolver.Enabled(),
 		GeoIPSource:              s.geoResolver.Source(),
 		GeoIPOnlineEnabled:       s.config.GeoIPOnline,

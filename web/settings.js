@@ -3,7 +3,7 @@
    configuration the container actually loaded. */
 
 import {
-  api, esc, toast, renderError, fmtShortDuration, fmtNumber,
+  api, esc, toast, renderError, fmtShortDuration, fmtDuration, fmtNumber,
   getSession, getThemePref, setThemePref,
   THEME_DARK, THEME_LIGHT, THEME_SYSTEM,
   signOutAfterPasswordChange,
@@ -23,6 +23,7 @@ const ONLINE_PROVIDER = 'ip-api.com';
 function configRows(settings) {
   return [
     ['Scrape interval', `every ${fmtShortDuration(settings.scrape_interval_seconds)}`],
+    ['Signed out after', fmtDuration(settings.session_lifetime_seconds)],
     ['History retention', DAY_LABEL(settings.retention_days)],
     ['Backups kept', fmtNumber(settings.backup_keep_last)],
     ['Daily backup', settings.backup_daily_enabled ? 'On' : 'Off'],

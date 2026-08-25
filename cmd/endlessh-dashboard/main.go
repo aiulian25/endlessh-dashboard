@@ -117,7 +117,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	authService := auth.NewService(dataStore, config.SessionLifetime)
+	authService := auth.NewService(dataStore, configuration.SessionLifetime)
 	created, err := authService.EnsureInitialUser(rootContext, configuration.AdminUsername, configuration.AdminPassword)
 	if err != nil {
 		return err
