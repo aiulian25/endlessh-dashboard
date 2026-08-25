@@ -16,8 +16,6 @@ bytes sent, and per-attacker detail across all your machines. Dark theme by defa
 
 ![The overview page: headline counters, a stacked activity chart, the country breakdown and a world map of attacker origins](docs/screenshots/overview.png)
 
-> The screenshots on this page come from a throwaway instance fed synthetic data. Every address in
-> them is from a range IANA reserves for documentation (RFC 5737), so nothing shown is a real host.
 
 ## What it is
 
@@ -141,6 +139,11 @@ docker compose up -d
 curl -fsS http://127.0.0.1:18222/healthz   # -> ok
 ```
 
+Then open `http://<the-host's-IP>:18222` from any machine on your network — the compose above
+publishes the port on every interface, so this works from your laptop or phone with no extra
+configuration. See [Reaching it from another machine](#reaching-it-from-another-machine) if it does
+not.
+
 Log in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The first login forces a password change; the seed
 password stops working immediately afterwards, so you can leave it in `.env` or remove it — either
 way it is no longer a valid credential. A fresh install shows an empty state prompting you to add
@@ -153,6 +156,62 @@ docker compose pull && docker compose up -d
 ```
 
 Your database is in the named volume, so it survives the upgrade untouched.
+
+## Reaching it from another machine
+
+**It is reachable from your LAN out of the box.** The compose above publishes `18222:18222`, which
+binds every interface on the host, and the container listens on `:18222`, which is every interface
+inside it. Nothing extra is needed — find the host's address and open it:
+
+```bash
+hostname -I | awk '{print $1}'
+```
+
+If `http://<that-address>:18222` does not answer, it is one of three things, in the order they are
+worth checking:
+
+**1. The host firewall.** The most common cause by far, and the port is unusual enough that no
+firewall knows about it. On ufw:
+
+```bash
+sudo ufw allow 18222/tcp
+```
+
+**2. `LISTEN_ADDR` was narrowed.** `LISTEN_ADDR=:18222` means "every interface inside the
+container", which is what you want. Setting it to `127.0.0.1:18222` makes the app listen on the
+container's own loopback only, and the published port then reaches nothing — connections are
+refused from the LAN even though `docker ps` looks perfectly healthy. Leave it as `:18222` and
+control exposure with the `ports:` line instead, which is what it is for.
+
+**3. The port was bound to loopback.** `- "127.0.0.1:18222:18222"` publishes only to the host
+itself. That is the right setting when a reverse proxy on the same machine is the only thing that
+should reach it — and the wrong one if you want to open the dashboard from your laptop.
+
+### If the page loads but signing in does nothing
+
+This one is worth knowing about, because nothing on screen explains it. `SECURE_COOKIES=on` marks
+the session cookie `Secure`, and **every browser silently discards a `Secure` cookie that arrives
+over plain `http://`** on anything other than `localhost`. The page loads, the password is correct,
+the login request returns 200 — and you land back on the login screen with no error, because the
+cookie was thrown away before it was ever stored.
+
+Over a LAN address on plain HTTP, use the default:
+
+```ini
+SECURE_COOKIES=auto
+```
+
+`auto` sets the flag when the request actually arrived over TLS — directly, or through a proxy that
+sent `X-Forwarded-Proto: https` — and leaves it off otherwise. Behind a proxy that terminates TLS
+properly it behaves exactly like `on`, so there is rarely a reason to set `on` by hand. Do set it
+if you want a deliberate tripwire that makes plain-HTTP access impossible.
+
+### A word about what LAN access means
+
+Plain HTTP on a LAN means the session cookie crosses your network unencrypted. On a home network
+you control, that is a normal trade-off. It stops being one the moment the dashboard is reachable
+from beyond it — put TLS in front before that happens, and see
+[TLS and reverse proxies](#tls-and-reverse-proxies).
 
 ## Supported platforms
 
@@ -220,7 +279,7 @@ are never written to logs.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LISTEN_ADDR` | `:18222` | Address the HTTP server binds to. |
+| `LISTEN_ADDR` | `:18222` | Address the HTTP server binds to. Keep the host part empty — `:18222` listens on every interface *inside the container*, which is what lets the published port reach it. Narrowing it to `127.0.0.1:18222` makes the container unreachable from anywhere, including your LAN. Control exposure with the compose `ports:` line instead. |
 | `DATA_DIR` | `/data` | Directory for `endlessh.db` and `backups/`. The only path the app writes to. |
 | `ADMIN_USERNAME` | `admin` | Seed admin account, created on first start only. |
 | `ADMIN_PASSWORD` | *(required on first start)* | Seed password. Must be changed at first login; ignored once a user row exists. |
