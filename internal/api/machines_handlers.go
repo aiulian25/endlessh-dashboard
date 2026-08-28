@@ -66,6 +66,36 @@ func (r machineRequest) toInput() registry.MachineInput {
 	}
 }
 
+// maxMachineOrderIDs bounds the reorder payload. The sidebar can only hold as
+// many machines as are registered, so a list far longer than any plausible
+// install is not an order — it is someone seeing how much work one request can
+// make the database do.
+const maxMachineOrderIDs = 1000
+
+type machineOrderRequest struct {
+	MachineIDs []int64 `json:"machine_ids"`
+}
+
+// handleReorderMachines stores the sidebar order. It changes no scrape target
+// and no credential — the worst a malformed body can do is arrange the list
+// badly, which the operator can drag back.
+func (s *Server) handleReorderMachines(writer http.ResponseWriter, request *http.Request) {
+	var payload machineOrderRequest
+	if !decodeJSON(writer, request, &payload) {
+		return
+	}
+	if len(payload.MachineIDs) > maxMachineOrderIDs {
+		writeError(writer, http.StatusBadRequest, "that is more machines than this dashboard can hold")
+		return
+	}
+	if err := s.registry.Reorder(request.Context(), payload.MachineIDs); err != nil {
+		s.logger.Error("reorder machines", "error", err)
+		writeError(writer, http.StatusInternalServerError, "could not save the machine order")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListMachines(writer http.ResponseWriter, request *http.Request) {
 	machines, err := s.registry.List(request.Context())
 	if err != nil {

@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/machines", s.protected(s.handleCreateMachine))
 	mux.Handle("POST /api/machines/test", s.protected(s.handleTestMachine))
 	mux.Handle("PUT /api/machines/{id}", s.protected(s.handleUpdateMachine))
+	mux.Handle("PUT /api/machines/order", s.protected(s.handleReorderMachines))
 	mux.Handle("DELETE /api/machines/{id}", s.protected(s.handleDeleteMachine))
 
 	mux.Handle("GET /api/overview", s.protected(s.handleOverview))

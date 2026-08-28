@@ -1347,3 +1347,73 @@ func TestSessionLifetimeReachesTheCookieAndTheSettingsPage(t *testing.T) {
 		t.Errorf("settings report a %ds session, want %d", effective.SessionLifetimeSeconds, int(configured.Seconds()))
 	}
 }
+
+// The sidebar order is a server-side setting, so it has to survive the browser
+// that set it — that is the entire reason it is not in localStorage.
+func TestMachineOrderIsStoredAndReturnedInOrder(t *testing.T) {
+	testHarness := newSignedInHarness(t)
+	alpha := testHarness.seedMachine("alpha")
+	beta := testHarness.seedMachine("beta")
+	gamma := testHarness.seedMachine("gamma")
+
+	names := func(label string) []string {
+		answer := testHarness.request(http.MethodGet, "/api/machines", nil)
+		assertStatus(t, label, answer, http.StatusOK)
+		var listed []machineResponse
+		answer.decode(t, &listed)
+		out := make([]string, len(listed))
+		for index, machine := range listed {
+			out[index] = machine.Name
+		}
+		return out
+	}
+
+	// Untouched, the list is alphabetical exactly as it always was.
+	if got := names("GET /api/machines before ordering"); !slices.Equal(got, []string{"alpha", "beta", "gamma"}) {
+		t.Fatalf("initial order %v, want it unchanged and alphabetical", got)
+	}
+
+	reorder := testHarness.request(http.MethodPut, "/api/machines/order",
+		map[string]any{"machine_ids": []int64{gamma.ID, alpha.ID, beta.ID}})
+	assertStatus(t, "PUT /api/machines/order", reorder, http.StatusNoContent)
+
+	if got := names("GET /api/machines after ordering"); !slices.Equal(got, []string{"gamma", "alpha", "beta"}) {
+		t.Errorf("order after reordering = %v, want the order that was sent", got)
+	}
+
+	// A machine registered later has never been placed by hand, so it appends
+	// rather than landing in the middle of an order somebody chose.
+	testHarness.seedMachine("delta")
+	if got := names("GET /api/machines after a new machine"); !slices.Equal(got, []string{"gamma", "alpha", "beta", "delta"}) {
+		t.Errorf("order with a new machine = %v, want it appended", got)
+	}
+
+	// An id for a machine that no longer exists is ignored rather than refused:
+	// a stale tab must not be able to fail every save it attempts.
+	stale := testHarness.request(http.MethodPut, "/api/machines/order",
+		map[string]any{"machine_ids": []int64{beta.ID, 99999, alpha.ID}})
+	assertStatus(t, "PUT /api/machines/order with an unknown id", stale, http.StatusNoContent)
+	if got := names("GET /api/machines after a stale order"); !slices.Equal(got[:2], []string{"beta", "alpha"}) {
+		t.Errorf("order after a stale save = %v, want the machines that still exist placed", got)
+	}
+}
+
+// PUT /api/machines/order and PUT /api/machines/{id} differ only in the last
+// segment. If "order" were ever parsed as an id, reordering would silently
+// become an attempt to edit a machine.
+func TestMachineOrderRouteIsNotSwallowedByTheIDRoute(t *testing.T) {
+	testHarness := newSignedInHarness(t)
+	machine := testHarness.seedMachine("alpha")
+
+	answer := testHarness.request(http.MethodPut, "/api/machines/order",
+		map[string]any{"machine_ids": []int64{machine.ID}})
+	assertStatus(t, "PUT /api/machines/order", answer, http.StatusNoContent)
+
+	// The machine is untouched: the reorder did not reach the update handler.
+	after := testHarness.request(http.MethodGet, "/api/machines", nil)
+	var listed []machineResponse
+	after.decode(t, &listed)
+	if len(listed) != 1 || listed[0].Name != "alpha" {
+		t.Fatalf("machines are %+v, want the one seeded machine unchanged", listed)
+	}
+}

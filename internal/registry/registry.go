@@ -77,6 +77,14 @@ func (s *Service) Update(ctx context.Context, id int64, input MachineInput) (sto
 	return existing, nil
 }
 
+// Reorder records the sidebar order. It is deliberately thin — there is nothing
+// to validate that the store does not already handle, and no scrape target is
+// being changed — but it keeps the handler talking to one service rather than
+// reaching past it into the store for this one call.
+func (s *Service) Reorder(ctx context.Context, machineIDs []int64) error {
+	return s.store.SetMachineOrder(ctx, machineIDs)
+}
+
 func (s *Service) Delete(ctx context.Context, id int64) error {
 	return s.store.DeleteMachine(ctx, id)
 }

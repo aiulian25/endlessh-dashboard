@@ -32,9 +32,39 @@ type Machine struct {
 const machineColumns = `id, name, host, port, metrics_path, group_label, enabled, created_at,
 	last_scrape_at, last_ok_at, consecutive_failures, last_error`
 
+// SetMachineOrder records the sidebar order. Ids are positioned in the order
+// given; every machine not named is reset to unplaced, so it sorts after them by
+// name. One transaction, because a half-applied order is a sidebar in an order
+// nobody chose.
+//
+// Unknown ids are ignored rather than refused: the list is a view preference,
+// and a stale tab reordering around a machine deleted a moment ago should place
+// the ones that still exist, not fail outright.
+func (s *Store) SetMachineOrder(ctx context.Context, machineIDs []int64) error {
+	transaction, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set machine order: %w", err)
+	}
+	defer transaction.Rollback()
+
+	if _, err := transaction.ExecContext(ctx, "UPDATE machines SET sort_order = NULL"); err != nil {
+		return fmt.Errorf("clear machine order: %w", err)
+	}
+	for position, machineID := range machineIDs {
+		if _, err := transaction.ExecContext(ctx,
+			"UPDATE machines SET sort_order = ? WHERE id = ?", position, machineID); err != nil {
+			return fmt.Errorf("set machine order: %w", err)
+		}
+	}
+	return transaction.Commit()
+}
+
 func (s *Store) ListMachines(ctx context.Context) ([]Machine, error) {
 	rows, err := s.database.QueryContext(ctx,
-		"SELECT "+machineColumns+" FROM machines ORDER BY name COLLATE NOCASE")
+		// Hand-arranged machines first, in the arranged order; everything never
+		// placed by hand after them, by name, exactly as before this existed.
+		"SELECT "+machineColumns+` FROM machines
+		 ORDER BY sort_order IS NULL, sort_order, name COLLATE NOCASE`)
 	if err != nil {
 		return nil, fmt.Errorf("list machines: %w", err)
 	}

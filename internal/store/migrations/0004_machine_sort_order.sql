@@ -1,0 +1,11 @@
+-- The order the operator arranged the sidebar into. Held on the server rather
+-- than per browser: there is one administrator, and a running order that only
+-- applies on the laptop it was set on is a setting that appears to have been
+-- forgotten every time it is opened somewhere else.
+--
+-- Nullable on purpose. NULL means "never placed by hand", which is every
+-- machine that exists when this migration runs and every machine registered
+-- afterwards. Those sort after the arranged ones, alphabetically, so adding a
+-- tarpit appends it instead of dropping it into the middle of an order the
+-- operator chose.
+ALTER TABLE machines ADD COLUMN sort_order INTEGER;
