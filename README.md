@@ -686,14 +686,14 @@ Images are published to GitHub Container Registry with two kinds of tag:
 
 | Tag | Meaning |
 | --- | --- |
-| `ghcr.io/aiulian25/endlessh-dashboard:1.1.0` | An exact release. It never changes. |
+| `ghcr.io/aiulian25/endlessh-dashboard:1.2.0` | An exact release. It never changes. |
 | `ghcr.io/aiulian25/endlessh-dashboard:latest` | Whatever the newest release is. Moves every time one ships. |
 
 `latest` is the friendlier default and is what the quick start uses. Pin the version tag instead if
 you would rather decide for yourself when the container changes underneath you:
 
 ```yaml
-image: ghcr.io/aiulian25/endlessh-dashboard:1.1.0
+image: ghcr.io/aiulian25/endlessh-dashboard:1.2.0
 ```
 
 The database is migrated forward automatically on start, and every migration so far is additive.
