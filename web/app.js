@@ -75,6 +75,7 @@ const ICONS = {
   check: { vb: 24, body: '<path d="M4 12.5l5 5L20 6.5"/>' },
   info: { vb: 24, body: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 8h.01"/>' },
   archive: { vb: 24, body: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/>' },
+  grip: { vb: 24, body: '<circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/>' },
 };
 
 export function icon(name, size = 16) {
@@ -393,6 +394,52 @@ function writeSelected() {
   else localStorage.setItem(MACHINES_KEY, JSON.stringify(selected));
 }
 
+// The order the operator dragged the sidebar into lives on the server, in the
+// machines table, not in this browser. There is one administrator and one
+// dashboard: an arrangement that only applied on the laptop it was made on
+// would look forgotten every time the phone was opened. `machines` therefore
+// arrives already ordered, and the sidebar simply draws it.
+//
+// Reordering is applied here first and saved afterwards, so a drag lands
+// instantly rather than waiting on a round trip; if the save fails the list is
+// reloaded from the server, which is the only thing that can say what the order
+// really is.
+async function persistMachineOrder() {
+  const ids = machines.map((machine) => machine.id);
+  try {
+    await api('/machines/order', { method: 'PUT', body: { machine_ids: ids } });
+  } catch (error) {
+    if (error.status === 401) return;
+    toast('Could not save the new order.', 'error');
+    await loadMachines();
+    renderSidebar();
+  }
+}
+
+// moveMachine shifts one machine by delta places. Returns where it landed, so
+// the caller can say so out loud for anyone not watching the sidebar.
+function moveMachine(machineId, delta) {
+  const from = machines.findIndex((machine) => machine.id === machineId);
+  const to = from + delta;
+  if (from < 0 || to < 0 || to >= machines.length) return null;
+  machines.splice(to, 0, machines.splice(from, 1)[0]);
+  persistMachineOrder();
+  return { position: to + 1, total: machines.length };
+}
+
+// dropMachineOn moves the dragged machine to where the one it was dropped on
+// sits, pushing that one along rather than swapping the two: a swap is what
+// people expect least from a list they are dragging within.
+function dropMachineOn(draggedId, targetId) {
+  if (draggedId === targetId) return false;
+  const from = machines.findIndex((machine) => machine.id === draggedId);
+  const to = machines.findIndex((machine) => machine.id === targetId);
+  if (from < 0 || to < 0) return false;
+  machines.splice(to, 0, machines.splice(from, 1)[0]);
+  persistMachineOrder();
+  return true;
+}
+
 // effectiveSelection is what the dashboard actually reports on: every machine
 // when nothing was ever chosen, otherwise exactly what is ticked.
 function effectiveSelection() {
@@ -416,7 +463,12 @@ export function machinesParam() {
 // carries the machines the dashboard currently reports on, so its own ordering
 // would repaint a machine as soon as the selection changed.
 export function seriesIndexForMachine(machineId, fallbackIndex) {
-  const index = machines.findIndex((machine) => machine.id === machineId);
+  // Ranked by id, deliberately, not by position in `machines`. That list is
+  // ordered by name and can now be reordered by hand, so keying colour off it
+  // would repaint every machine on a rename or a drag. Ids are assigned once
+  // and never change, so a machine keeps its colour for as long as it exists.
+  const ranked = machines.map((machine) => machine.id).sort((left, right) => left - right);
+  const index = ranked.indexOf(machineId);
   return index < 0 ? fallbackIndex : index;
 }
 
@@ -452,7 +504,6 @@ const SPARK_GAP = 2;
 const SPARK_FLOOR = 0.1;
 const SPARK_MIN_OPACITY = 0.3;
 const SPARK_OPACITY_RANGE = 0.55;
-const SERIES_COUNT = 3;
 
 function activityValues(machine) {
   const raw = Array.isArray(machine.activity) ? machine.activity : [];
@@ -476,10 +527,15 @@ function sparkline(machine, index) {
     const fraction = Math.max(SPARK_FLOOR, scaled);
     const height = fraction * SPARK_HEIGHT;
     const opacity = SPARK_MIN_OPACITY + SPARK_OPACITY_RANGE * scaled;
-    return `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="${(SPARK_HEIGHT - height).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${height.toFixed(2)}" rx="1" fill-opacity="${opacity.toFixed(2)}"></rect>`;
+    return `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="${(SPARK_HEIGHT - height).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${height.toFixed(2)}" rx="1" fill="currentColor" fill-opacity="${opacity.toFixed(2)}"></rect>`;
   }).join('');
 
-  return `<svg class="spark spark-${(index % SERIES_COUNT) + 1}" viewBox="0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${bars}</svg>`;
+  // The same palette class the chart and the map use, keyed to the machine
+  // rather than to where it currently sits: dragging a card must move it, not
+  // repaint it. It carried its own three-colour cycle over the display index
+  // before, so the first and fourth cards in the sidebar were the same blue.
+  const colour = paletteClass(seriesIndexForMachine(machine.id, index));
+  return `<svg class="spark ${colour}" viewBox="0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${bars}</svg>`;
 }
 
 function unreachableFor(machine) {
@@ -509,8 +565,11 @@ function machineCardBody(machine, index) {
 
 function machineCard(machine, index) {
   return `
-    <div class="mcard${machine.status === STATUS_DOWN ? ' down' : ''}">
+    <div class="mcard${machine.status === STATUS_DOWN ? ' down' : ''}" data-machine="${machine.id}">
       <div class="mcard-top">
+        <button type="button" class="mcard-grip" draggable="true" data-grip="${machine.id}"
+          aria-label="Reorder ${esc(machine.name)}. Drag, or press the up and down arrow keys."
+          title="Drag to reorder">${icon('grip', 14)}</button>
         <input type="checkbox" class="mcard-check" value="${machine.id}"
           aria-label="Include ${esc(machine.name)} in the dashboard"
           ${effectiveSelection().includes(machine.id) ? 'checked' : ''}>
@@ -555,6 +614,82 @@ function renderSidebar() {
     box.addEventListener('change', () => {
       const ids = Array.from(list.querySelectorAll('.mcard-check:checked')).map((input) => Number(input.value));
       applySelection(ids);
+    });
+  });
+
+  wireReordering(list);
+}
+
+// Redraw after a reorder and put the keyboard back where it was. Without this
+// the card moves out from under the focus and the next arrow press goes
+// nowhere, which makes keyboard reordering unusable after the first step.
+function renderSidebarKeepingGripFocus(machineId) {
+  renderSidebar();
+  const grip = document.querySelector(`.mcard-grip[data-grip="${machineId}"]`);
+  if (grip) grip.focus();
+}
+
+function announce(message) {
+  const live = document.getElementById('live');
+  if (live) live.textContent = message;
+}
+
+// wireReordering gives the sidebar both ways to reorder: dragging for a pointer,
+// and the arrow keys for anyone who cannot drag — a mouse-only affordance would
+// put the feature out of reach of keyboard and screen-reader users entirely.
+function wireReordering(list) {
+  let draggedId = null;
+
+  const clearDropStyling = () => {
+    list.querySelectorAll('.mcard').forEach((card) => card.classList.remove('drop-target', 'dragging'));
+  };
+
+  list.querySelectorAll('.mcard-grip').forEach((grip) => {
+    const machineId = Number(grip.dataset.grip);
+
+    grip.addEventListener('dragstart', (event) => {
+      draggedId = machineId;
+      // Some browsers refuse to start a drag with no payload set.
+      event.dataTransfer.setData('text/plain', String(machineId));
+      event.dataTransfer.effectAllowed = 'move';
+      grip.closest('.mcard').classList.add('dragging');
+    });
+
+    grip.addEventListener('dragend', () => {
+      draggedId = null;
+      clearDropStyling();
+    });
+
+    grip.addEventListener('keydown', (event) => {
+      const delta = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0;
+      if (!delta) return;
+      // The arrows would otherwise scroll the sidebar out from under the card.
+      event.preventDefault();
+      const moved = moveMachine(machineId, delta);
+      if (!moved) return;
+      const name = machines.find((machine) => machine.id === machineId);
+      announce(`${name ? name.name : 'Machine'} moved to position ${moved.position} of ${moved.total}.`);
+      renderSidebarKeepingGripFocus(machineId);
+    });
+  });
+
+  list.querySelectorAll('.mcard').forEach((card) => {
+    card.addEventListener('dragover', (event) => {
+      if (draggedId === null) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      if (Number(card.dataset.machine) !== draggedId) card.classList.add('drop-target');
+    });
+
+    card.addEventListener('dragleave', () => card.classList.remove('drop-target'));
+
+    card.addEventListener('drop', (event) => {
+      event.preventDefault();
+      const targetId = Number(card.dataset.machine);
+      const moving = draggedId;
+      draggedId = null;
+      clearDropStyling();
+      if (moving !== null && dropMachineOn(moving, targetId)) renderSidebar();
     });
   });
 }

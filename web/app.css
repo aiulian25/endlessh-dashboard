@@ -393,6 +393,45 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mcard.down { border-color: var(--danger-border); }
 
 .mcard-top { display: flex; align-items: center; gap: 8px; }
+
+/* The reorder handle. A control of its own rather than making the whole card
+   draggable: the card carries a checkbox and a link, and dragging either of
+   those is native browser behaviour that would fight this one. */
+.mcard-grip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  /* The whole card is the machine link's hit area (.mcard-link::after covers
+     it), so the grip has to climb above it exactly as the checkbox does —
+     without this it looks draggable and nothing happens, because every pointer
+     event lands on the link instead. */
+  position: relative;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: grab;
+  /* The pointer target is bigger than the dots, without the dots taking the
+     space — 14px of icon is below the size a finger can reliably hit. */
+  margin: -6px 0 -6px -4px;
+  padding: 6px 2px 6px 4px;
+  touch-action: none;
+}
+.mcard-grip:hover { color: var(--ink); }
+.mcard-grip:active { cursor: grabbing; }
+
+.mcard.dragging { opacity: .45; }
+.mcard.drop-target {
+  border-color: var(--primary);
+  box-shadow: inset 0 2px 0 0 var(--primary);
+}
+
+/* Someone who has asked for less motion still needs to see where a card landed;
+   the colour change carries that on its own. */
+@media (prefers-reduced-motion: reduce) {
+  .mcard { transition: none; }
+}
 .mcard-check {
   position: relative;
   z-index: 1;
@@ -429,9 +468,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mcard-note { font-size: 11px; color: var(--muted); }
 
 .spark { display: block; width: 100%; height: 22px; }
-.spark-1 rect { fill: var(--series-1); }
-.spark-2 rect { fill: var(--series-2); }
-.spark-3 rect { fill: var(--series-3); }
+/* The bars take their colour from the .s-N palette class on the svg, so the
+   sidebar, the chart and the map all read from one set of eight rather than
+   three separate cycles that disagreed past the third machine. */
+.spark rect { fill: currentColor; }
 
 .drawer-btn { display: none; }
 

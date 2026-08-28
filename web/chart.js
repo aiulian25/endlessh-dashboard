@@ -1,11 +1,10 @@
 /* Hand-rolled stacked-area chart for the /api/timeseries payload. No dependencies. */
 
-import { esc, fmtDuration, seriesIndexForMachine } from './app.js';
+import { esc, fmtDuration, seriesIndexForMachine, PALETTE_SIZE } from './app.js';
 
 const VIEW_W = 1000;
 const VIEW_H = 220;
 const GRID_LINES = [0.25, 0.5, 0.75];
-const SERIES_COUNT = 3;
 const OPACITY_STEPS = 6;
 const AXIS_LABELS = 5;
 const SR_ROW_LIMIT = 60;
@@ -14,9 +13,11 @@ const SHORT_SPAN_MS = 36 * 3600 * 1000;
 const NOW_TOLERANCE_MS = 5 * 60 * 1000;
 
 // A machine keeps the same colour whichever machines are being shown, so the
-// swatch matches the sparkline on its sidebar card.
+// swatch matches the sparkline on its sidebar card. The wrap is at PALETTE_SIZE
+// rather than a count of its own: at 3 it repeated after the third machine, so
+// the fourth and the first were drawn identically in a stack of six.
 function seriesClass(entry, index) {
-  return `s-${(seriesIndexForMachine(entry.machine_id, index) % SERIES_COUNT) + 1}`;
+  return `s-${(seriesIndexForMachine(entry.machine_id, index) % PALETTE_SIZE) + 1}`;
 }
 
 export function renderLegend(host, series) {
