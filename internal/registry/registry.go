@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"endlessh-dashboard/internal/store"
 )
@@ -38,6 +39,14 @@ func (s *Service) Create(ctx context.Context, input MachineInput) (store.Machine
 	if err := s.check(ctx, &input); err != nil {
 		return store.Machine{}, err
 	}
+	colour := input.Colour
+	if colour == "" {
+		chosen, err := s.freeColour(ctx)
+		if err != nil {
+			return store.Machine{}, err
+		}
+		colour = chosen
+	}
 	machine, err := s.store.CreateMachine(ctx, store.Machine{
 		Name:        input.Name,
 		Host:        input.Host,
@@ -45,11 +54,34 @@ func (s *Service) Create(ctx context.Context, input MachineInput) (store.Machine
 		MetricsPath: input.MetricsPath,
 		GroupLabel:  input.GroupLabel,
 		Enabled:     input.Enabled,
+		Colour:      colour,
 	})
 	if errors.Is(err, store.ErrDuplicateMachineName) {
 		return store.Machine{}, invalid("name", "a machine named %q already exists", input.Name)
 	}
 	return machine, err
+}
+
+// freeColour picks a colour for a machine registered without one: the lowest
+// slot nobody is using, or — once every slot is taken — the least used, so the
+// sixteenth machine repeats a colour instead of being given none.
+func (s *Service) freeColour(ctx context.Context) (string, error) {
+	used, err := s.store.UsedColours(ctx)
+	if err != nil {
+		return "", err
+	}
+	best, fewest := "", -1
+	for slot := 1; slot <= PaletteSize; slot++ {
+		colour := fmt.Sprintf("s-%d", slot)
+		count := used[colour]
+		if count == 0 {
+			return colour, nil
+		}
+		if fewest < 0 || count < fewest {
+			best, fewest = colour, count
+		}
+	}
+	return best, nil
 }
 
 func (s *Service) Update(ctx context.Context, id int64, input MachineInput) (store.Machine, error) {
@@ -67,6 +99,12 @@ func (s *Service) Update(ctx context.Context, id int64, input MachineInput) (sto
 	existing.MetricsPath = input.MetricsPath
 	existing.GroupLabel = input.GroupLabel
 	existing.Enabled = input.Enabled
+	// Only when one was sent. An empty colour means "not specified", so a
+	// caller editing the host or the port does not silently wipe the machine's
+	// colour by leaving the field out.
+	if input.Colour != "" {
+		existing.Colour = input.Colour
+	}
 
 	if err := s.store.UpdateMachine(ctx, existing); err != nil {
 		if errors.Is(err, store.ErrDuplicateMachineName) {

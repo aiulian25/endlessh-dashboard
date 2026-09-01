@@ -345,6 +345,13 @@ export function statusDot(status) {
 // country carries the same colour in both.
 export const PALETTE_SIZE = 8;
 
+// How many colours a machine can be given. Larger than PALETTE_SIZE, which
+// bounds the ranked country colours on the map and the donut: those are derived
+// and only ever need enough to tell the busiest few apart, while a machine
+// colour is chosen by hand and wants real variety. Mirrors registry.PaletteSize
+// and the .s-N classes in app.css; all three move together.
+export const MACHINE_PALETTE_SIZE = 16;
+
 export function paletteClass(rank) {
   return rank >= 0 && rank < PALETTE_SIZE ? `s-${rank + 1}` : 's-other';
 }
@@ -459,17 +466,18 @@ export function machinesParam() {
   return selected.length ? selected.join(',') : NO_MACHINES;
 }
 
-// seriesIndexForMachine keeps a machine on one colour everywhere: the chart only
+// machineColour is the palette class a machine is drawn in, everywhere: the chart only
 // carries the machines the dashboard currently reports on, so its own ordering
 // would repaint a machine as soon as the selection changed.
-export function seriesIndexForMachine(machineId, fallbackIndex) {
-  // Ranked by id, deliberately, not by position in `machines`. That list is
-  // ordered by name and can now be reordered by hand, so keying colour off it
-  // would repaint every machine on a rename or a drag. Ids are assigned once
-  // and never change, so a machine keeps its colour for as long as it exists.
-  const ranked = machines.map((machine) => machine.id).sort((left, right) => left - right);
+export function machineColour(machineId, fallbackIndex = 0) {
+  const machine = machines.find((candidate) => candidate.id === machineId);
+  if (machine && machine.colour) return machine.colour;
+  // Only for a machine registered before colours were stored, or one the list
+  // has not caught up with. Ranked by id rather than by position, so even the
+  // fallback cannot move when the sidebar is dragged.
+  const ranked = machines.map((candidate) => candidate.id).sort((left, right) => left - right);
   const index = ranked.indexOf(machineId);
-  return index < 0 ? fallbackIndex : index;
+  return paletteClass((index < 0 ? fallbackIndex : index) % PALETTE_SIZE);
 }
 
 // applySelection records the new selection without redrawing the cards, so the
@@ -534,7 +542,7 @@ function sparkline(machine, index) {
   // rather than to where it currently sits: dragging a card must move it, not
   // repaint it. It carried its own three-colour cycle over the display index
   // before, so the first and fourth cards in the sidebar were the same blue.
-  const colour = paletteClass(seriesIndexForMachine(machine.id, index));
+  const colour = machineColour(machine.id, index);
   return `<svg class="spark ${colour}" viewBox="0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${bars}</svg>`;
 }
 

@@ -27,10 +27,11 @@ type Machine struct {
 	LastOKAt            *time.Time
 	ConsecutiveFailures int
 	LastError           string
+	Colour              string
 }
 
 const machineColumns = `id, name, host, port, metrics_path, group_label, enabled, created_at,
-	last_scrape_at, last_ok_at, consecutive_failures, last_error`
+	last_scrape_at, last_ok_at, consecutive_failures, last_error, colour`
 
 // SetMachineOrder records the sidebar order. Ids are positioned in the order
 // given; every machine not named is reset to unplaced, so it sorts after them by
@@ -108,13 +109,35 @@ func (s *Store) GetMachine(ctx context.Context, id int64) (Machine, error) {
 	return machine, nil
 }
 
+// UsedColours counts how many machines carry each colour, so a machine created
+// without one can be given a slot nobody is using rather than a duplicate.
+func (s *Store) UsedColours(ctx context.Context) (map[string]int, error) {
+	rows, err := s.database.QueryContext(ctx,
+		"SELECT colour, COUNT(*) FROM machines WHERE colour <> '' GROUP BY colour")
+	if err != nil {
+		return nil, fmt.Errorf("used colours: %w", err)
+	}
+	defer rows.Close()
+
+	used := map[string]int{}
+	for rows.Next() {
+		var colour string
+		var count int
+		if err := rows.Scan(&colour, &count); err != nil {
+			return nil, err
+		}
+		used[colour] = count
+	}
+	return used, rows.Err()
+}
+
 func (s *Store) CreateMachine(ctx context.Context, machine Machine) (Machine, error) {
 	machine.CreatedAt = time.Now().UTC()
 	result, err := s.database.ExecContext(ctx,
-		`INSERT INTO machines (name, host, port, metrics_path, group_label, enabled, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO machines (name, host, port, metrics_path, group_label, enabled, created_at, colour)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		machine.Name, machine.Host, machine.Port, machine.MetricsPath,
-		machine.GroupLabel, machine.Enabled, machine.CreatedAt.Unix())
+		machine.GroupLabel, machine.Enabled, machine.CreatedAt.Unix(), machine.Colour)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Machine{}, ErrDuplicateMachineName
@@ -137,10 +160,10 @@ func (s *Store) CreateMachine(ctx context.Context, machine Machine) (Machine, er
 func (s *Store) UpdateMachine(ctx context.Context, machine Machine) error {
 	result, err := s.database.ExecContext(ctx,
 		`UPDATE machines
-		 SET name = ?, host = ?, port = ?, metrics_path = ?, group_label = ?, enabled = ?
+		 SET name = ?, host = ?, port = ?, metrics_path = ?, group_label = ?, enabled = ?, colour = ?
 		 WHERE id = ?`,
 		machine.Name, machine.Host, machine.Port, machine.MetricsPath,
-		machine.GroupLabel, machine.Enabled, machine.ID)
+		machine.GroupLabel, machine.Enabled, machine.Colour, machine.ID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrDuplicateMachineName
@@ -199,7 +222,7 @@ func scanMachine(scanner rowScanner) (Machine, error) {
 	err := scanner.Scan(
 		&machine.ID, &machine.Name, &machine.Host, &machine.Port, &machine.MetricsPath,
 		&machine.GroupLabel, &machine.Enabled, &createdAt, &lastScrapeAt, &lastOKAt,
-		&machine.ConsecutiveFailures, &machine.LastError,
+		&machine.ConsecutiveFailures, &machine.LastError, &machine.Colour,
 	)
 	if err != nil {
 		return Machine{}, err

@@ -40,6 +40,7 @@ type machineResponse struct {
 	LastError           string     `json:"last_error"`
 	TrappedNow          int        `json:"trapped_now"`
 	Activity            []float64  `json:"activity"`
+	Colour              string     `json:"colour"`
 }
 
 type machineRequest struct {
@@ -49,6 +50,7 @@ type machineRequest struct {
 	MetricsPath string `json:"metrics_path"`
 	GroupLabel  string `json:"group_label"`
 	Enabled     *bool  `json:"enabled"`
+	Colour      string `json:"colour"`
 }
 
 func (r machineRequest) toInput() registry.MachineInput {
@@ -63,6 +65,7 @@ func (r machineRequest) toInput() registry.MachineInput {
 		MetricsPath: r.MetricsPath,
 		GroupLabel:  r.GroupLabel,
 		Enabled:     enabled,
+		Colour:      r.Colour,
 	}
 }
 
@@ -210,6 +213,7 @@ func toMachineResponse(machine store.Machine, trappedNow int, activity []float64
 		LastError:           machine.LastError,
 		TrappedNow:          trappedNow,
 		Activity:            denseActivity(activity),
+		Colour:              machine.Colour,
 	}
 }
 

@@ -626,7 +626,7 @@ func TestMachinesLifecycle(t *testing.T) {
 	}
 	assertJSONKeys(t, "POST /api/machines", created.body,
 		"id", "name", "host", "port", "metrics_path", "group_label", "enabled", "status",
-		"last_scrape_at", "last_ok_at", "consecutive_failures", "last_error", "trapped_now", "activity")
+		"last_scrape_at", "last_ok_at", "consecutive_failures", "last_error", "trapped_now", "activity", "colour")
 
 	listed := testHarness.request(http.MethodGet, "/api/machines", nil)
 	assertStatus(t, "GET /api/machines", listed, http.StatusOK)

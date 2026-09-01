@@ -1,6 +1,6 @@
 /* Hand-rolled stacked-area chart for the /api/timeseries payload. No dependencies. */
 
-import { esc, fmtDuration, seriesIndexForMachine, PALETTE_SIZE } from './app.js';
+import { esc, fmtDuration, machineColour } from './app.js';
 
 const VIEW_W = 1000;
 const VIEW_H = 220;
@@ -17,7 +17,7 @@ const NOW_TOLERANCE_MS = 5 * 60 * 1000;
 // rather than a count of its own: at 3 it repeated after the third machine, so
 // the fourth and the first were drawn identically in a stack of six.
 function seriesClass(entry, index) {
-  return `s-${(seriesIndexForMachine(entry.machine_id, index) % PALETTE_SIZE) + 1}`;
+  return machineColour(entry.machine_id, index);
 }
 
 export function renderLegend(host, series) {

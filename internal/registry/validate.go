@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -64,11 +65,35 @@ type MachineInput struct {
 	MetricsPath string
 	GroupLabel  string
 	Enabled     bool
+	Colour      string
+}
+
+// PaletteSize is how many colours a machine can be given. The slots are named
+// s-1 .. s-16 and are defined once in web/app.css, with a value per theme, so a
+// stored colour stays legible in both. This is why the colour is a slot rather
+// than a hex value: a hex chosen against the dark background can be unreadable
+// on the light one, and nothing would stop it colliding with the amber that
+// means "trapped" or the red that means "down".
+const PaletteSize = 16
+
+// ValidColour reports whether a colour is one this app can actually draw. Empty
+// is valid and means "choose one for me".
+func ValidColour(colour string) bool {
+	if colour == "" {
+		return true
+	}
+	rest, found := strings.CutPrefix(colour, "s-")
+	if !found {
+		return false
+	}
+	slot, err := strconv.Atoi(rest)
+	return err == nil && slot >= 1 && slot <= PaletteSize
 }
 
 // Normalize trims the input and fills defaults before validation.
 func (input *MachineInput) Normalize() {
 	input.Name = strings.TrimSpace(input.Name)
+	input.Colour = strings.TrimSpace(input.Colour)
 	input.Host = strings.TrimSpace(strings.Trim(strings.TrimSpace(input.Host), "[]"))
 	input.GroupLabel = strings.TrimSpace(input.GroupLabel)
 	input.MetricsPath = strings.TrimSpace(input.MetricsPath)
@@ -88,6 +113,9 @@ func (v *Validator) ValidateSyntax(input MachineInput) error {
 	}
 	if len(input.Name) > MaxNameLength {
 		return invalid("name", "name must be %d characters or fewer", MaxNameLength)
+	}
+	if !ValidColour(input.Colour) {
+		return invalid("colour", "pick one of the colours offered")
 	}
 	if !namePattern.MatchString(input.Name) {
 		return invalid("name", "name may use letters, numbers, spaces, dots, dashes and underscores")

@@ -32,6 +32,14 @@
   --series-6: #56c8d8;
   --series-7: #e879a6;
   --series-8: #b0b7c9;
+  --series-9: #c2e34b;
+  --series-10: #2ec4b6;
+  --series-11: #7cc4fa;
+  --series-12: #c48cff;
+  --series-13: #f472d0;
+  --series-14: #ff7a8a;
+  --series-15: #b98756;
+  --series-16: #7f8fb5;
   --series-other: #6b7590;
 
   --map-sea: #0e1728;
@@ -87,6 +95,14 @@
     --series-6: #1f8ea0;
     --series-7: #bf4a7e;
     --series-8: #7b8494;
+    --series-9: #7d9420;
+    --series-10: #157f76;
+    --series-11: #2f7fbf;
+    --series-12: #8a4fd0;
+    --series-13: #b8409a;
+    --series-14: #c94a5a;
+    --series-15: #8a5f33;
+    --series-16: #5c6a8a;
     --series-other: #a9a396;
     --map-sea: #f2ebdd;
     --map-land: #d7c9ad;
@@ -131,6 +147,14 @@
   --series-6: #1f8ea0;
   --series-7: #bf4a7e;
   --series-8: #7b8494;
+  --series-9: #7d9420;
+  --series-10: #157f76;
+  --series-11: #2f7fbf;
+  --series-12: #8a4fd0;
+  --series-13: #b8409a;
+  --series-14: #c94a5a;
+  --series-15: #8a5f33;
+  --series-16: #5c6a8a;
   --series-other: #a9a396;
   --map-sea: #f2ebdd;
   --map-land: #d7c9ad;
@@ -215,6 +239,14 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .s-6 { background: var(--series-6); fill: var(--series-6); color: var(--series-6); }
 .s-7 { background: var(--series-7); fill: var(--series-7); color: var(--series-7); }
 .s-8 { background: var(--series-8); fill: var(--series-8); color: var(--series-8); }
+.s-9 { background: var(--series-9); fill: var(--series-9); color: var(--series-9); }
+.s-10 { background: var(--series-10); fill: var(--series-10); color: var(--series-10); }
+.s-11 { background: var(--series-11); fill: var(--series-11); color: var(--series-11); }
+.s-12 { background: var(--series-12); fill: var(--series-12); color: var(--series-12); }
+.s-13 { background: var(--series-13); fill: var(--series-13); color: var(--series-13); }
+.s-14 { background: var(--series-14); fill: var(--series-14); color: var(--series-14); }
+.s-15 { background: var(--series-15); fill: var(--series-15); color: var(--series-15); }
+.s-16 { background: var(--series-16); fill: var(--series-16); color: var(--series-16); }
 .s-other { background: var(--series-other); fill: var(--series-other); color: var(--series-other); }
 .o-0 { fill-opacity: var(--area-opacity); }
 .o-1 { fill-opacity: calc(var(--area-opacity) + .08); }
@@ -397,6 +429,44 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /* The reorder handle. A control of its own rather than making the whole card
    draggable: the card carries a checkbox and a link, and dragging either of
    those is native browser behaviour that would fight this one. */
+/* The colour picker in the machine dialog. Real radios, visually hidden, so the
+   group behaves like the single choice it is: arrow keys move through it, the
+   selection is announced, and none of that has to be reimplemented. */
+/* A label for a group of controls rather than a single input, so it is a span
+   with an id the group points at instead of a <label for>. Matches what a
+   real <label> looks like in these forms. */
+.field-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swatch {
+  display: inline-flex;
+  cursor: pointer;
+  border-radius: var(--r-pill);
+  /* The ring sits outside the dot rather than shrinking it, so a chosen swatch
+     is the same size as the rest and the row does not shift when you pick. */
+  padding: 3px;
+  border: 2px solid transparent;
+}
+.swatch:hover { border-color: var(--border); }
+.swatch:has(input:checked) { border-color: var(--ink); }
+.swatch:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* The .s-N palette class sits on the dot, not on the label around it: the label
+   is a <label> inside .field, and `.field label` sets a colour at specificity
+   (0,1,1) — which quietly beats `.s-N` at (0,1,0) and painted every swatch the
+   same grey. The class supplies `background` directly here, so no inheritance
+   is involved and nothing can outrank it. */
+.swatch-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-pill);
+}
+
 .mcard-grip {
   flex: none;
   display: inline-flex;

@@ -5,6 +5,7 @@ import {
   fmtDuration, fmtNumber, fmtRelative, fmtDateTime,
   loadMachines, statusBadge, statusDot, navigate,
   getWindow, setWindow, WINDOWS, STATUS_DOWN,
+  MACHINE_PALETTE_SIZE,
 } from './app.js';
 import { renderChart, renderLegend } from './chart.js';
 import { renderAttackersTable } from './attackers.js';
@@ -19,6 +20,7 @@ const FIELD_HINTS = [
   { field: 'port', keywords: ['port'] },
   { field: 'metrics_path', keywords: ['path', 'metrics'] },
   { field: 'group_label', keywords: ['group', 'label'] },
+  { field: 'colour', keywords: ['colour', 'color'] },
   { field: 'name', keywords: ['name'] },
 ];
 
@@ -26,6 +28,22 @@ function fieldForMessage(message) {
   const text = String(message || '').toLowerCase();
   const hit = FIELD_HINTS.find((hint) => hint.keywords.some((keyword) => text.includes(keyword)));
   return hit ? hit.field : null;
+}
+
+// One swatch per palette slot. Radios rather than buttons: a colour choice is
+// exactly a single-selection group, so the arrow keys move through it and a
+// screen reader announces it as a choice without any custom key handling.
+function colourSwatches(current) {
+  const chosen = current || '';
+  return Array.from({ length: MACHINE_PALETTE_SIZE }, (unused, index) => {
+    const slot = `s-${index + 1}`;
+    return `
+      <label class="swatch">
+        <input type="radio" name="colour" value="${slot}" class="sr-only"
+          ${chosen === slot ? 'checked' : ''} aria-label="Colour ${index + 1}">
+        <span class="swatch-dot ${slot}" aria-hidden="true"></span>
+      </label>`;
+  }).join('');
 }
 
 function formMarkup(machine) {
@@ -60,6 +78,15 @@ function formMarkup(machine) {
         <p class="field-error" data-error-for="group_label" hidden></p>
       </div>
       <div class="field span-2">
+        <span class="field-label" id="mf-colour-label">Colour</span>
+        <div class="swatches" role="radiogroup" aria-labelledby="mf-colour-label" id="mf-colour">
+          ${colourSwatches(value('colour'))}
+        </div>
+        <p class="field-hint">${machine ? 'Used on this machine\u2019s card, its sparkline and its line on the chart.'
+          : 'Leave it and an unused colour is chosen for you.'}</p>
+        <p class="field-error" data-error-for="colour" hidden></p>
+      </div>
+      <div class="field span-2">
         <label class="switch"><input type="checkbox" id="mf-enabled" ${enabled ? 'checked' : ''}> Scrape this machine</label>
       </div>
     </div>
@@ -75,6 +102,9 @@ function readForm(form) {
     metrics_path: form.querySelector('#mf-path').value.trim(),
     group_label: form.querySelector('#mf-group').value.trim(),
     enabled: form.querySelector('#mf-enabled').checked,
+    // Empty when nothing is picked, which the server reads as "choose one for
+    // me" and fills with a slot no other machine is using.
+    colour: form.querySelector('input[name="colour"]:checked')?.value || '',
   };
 }
 
