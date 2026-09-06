@@ -105,8 +105,9 @@ func (input *MachineInput) Normalize() {
 	}
 }
 
-// ValidateSyntax checks the shape of the input without touching the network.
-// ValidateSyntax checks the whole record: its label fields and its target.
+// ValidateSyntax checks the shape of the input without touching the network:
+// the label fields and, through ValidateTarget, where the scraper would connect.
+// Resolving that address is a separate step, run only when an edit moves it.
 func (v *Validator) ValidateSyntax(input MachineInput) error {
 	if input.Name == "" {
 		return invalid("name", "give the machine a name")

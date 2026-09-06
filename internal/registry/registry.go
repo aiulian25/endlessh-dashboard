@@ -36,7 +36,10 @@ func (s *Service) Get(ctx context.Context, id int64) (store.Machine, error) {
 }
 
 func (s *Service) Create(ctx context.Context, input MachineInput) (store.Machine, error) {
-	if err := s.check(ctx, &input); err != nil {
+	if err := s.checkShape(&input); err != nil {
+		return store.Machine{}, err
+	}
+	if _, err := s.validator.ResolveTarget(ctx, input.Host); err != nil {
 		return store.Machine{}, err
 	}
 	colour := input.Colour
@@ -89,8 +92,26 @@ func (s *Service) Update(ctx context.Context, id int64, input MachineInput) (sto
 	if err != nil {
 		return store.Machine{}, err
 	}
-	if err := s.check(ctx, &input); err != nil {
+	if err := s.checkShape(&input); err != nil {
 		return store.Machine{}, err
+	}
+
+	// Resolving the host reaches the network and applies the address policy. It
+	// is worth doing when the edit changes where the scraper would connect, or
+	// brings a paused machine back into the rotation. It is not worth doing for
+	// a rename or a colour: the poller resolves the host again before every
+	// single scrape and dials the address it got, so nothing here is the thing
+	// keeping a blocked target from being reached — while running it on every
+	// edit meant a machine whose host had gone away could not even be turned
+	// off, only deleted, taking its history with it.
+	targetChanged := input.Host != existing.Host ||
+		input.Port != existing.Port ||
+		input.MetricsPath != existing.MetricsPath
+	returningToService := input.Enabled && !existing.Enabled
+	if targetChanged || returningToService {
+		if _, err := s.validator.ResolveTarget(ctx, input.Host); err != nil {
+			return store.Machine{}, err
+		}
 	}
 
 	existing.Name = input.Name
@@ -127,16 +148,11 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 	return s.store.DeleteMachine(ctx, id)
 }
 
-// check runs both halves of validation: shape first, then the network-level
-// address rules. Re-running this on every edit is the point — a machine that
-// was fine yesterday may point somewhere blocked today.
-func (s *Service) check(ctx context.Context, input *MachineInput) error {
+// checkShape normalises the input and validates everything that can be decided
+// without touching the network. Resolving the target is deliberately not part of
+// it: the two are needed at different moments, and keeping them apart is what
+// lets an edit that does not move the target skip a lookup it does not need.
+func (s *Service) checkShape(input *MachineInput) error {
 	input.Normalize()
-	if err := s.validator.ValidateSyntax(*input); err != nil {
-		return err
-	}
-	if _, err := s.validator.ResolveTarget(ctx, input.Host); err != nil {
-		return err
-	}
-	return nil
+	return s.validator.ValidateSyntax(*input)
 }
