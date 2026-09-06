@@ -18,6 +18,9 @@ type contextKey string
 const (
 	contextKeyUser    contextKey = "user"
 	contextKeySession contextKey = "session"
+
+	forwardedProtoHeader = "X-Forwarded-Proto"
+	forwardedForHeader   = "X-Forwarded-For"
 )
 
 // contentSecurityPolicy allows nothing but this origin, with no inline script
@@ -167,7 +170,7 @@ func (s *Server) useSecureCookies(request *http.Request) bool {
 	if request.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(request.Header.Get("X-Forwarded-Proto"), "https")
+	return strings.EqualFold(request.Header.Get(forwardedProtoHeader), "https")
 }
 
 func (s *Server) setSessionCookie(writer http.ResponseWriter, request *http.Request, token string, expires time.Time) {
@@ -194,13 +197,69 @@ func (s *Server) clearSessionCookie(writer http.ResponseWriter, request *http.Re
 	})
 }
 
-// clientKey identifies a login attempt source for throttling. Behind a proxy
-// the socket address is the proxy's, which is why the throttle also keys on
-// the username being tried.
-func clientKey(request *http.Request, username string) string {
+// clientKey identifies a login attempt source for throttling: the account being
+// tried, at the address trying it. Both halves matter — the address alone would
+// let one noisy client on a shared line lock out everybody behind it, and the
+// username alone would let anyone lock out the only account this app has.
+func (s *Server) clientKey(request *http.Request, username string) string {
+	return strings.ToLower(username) + "@" + s.clientHost(request)
+}
+
+// clientHost is the address a login attempt is counted against. The socket
+// address is the honest answer and the default one. It stops being the client's
+// address only behind a reverse proxy, where every request arrives from the
+// proxy and one wrong password from anybody would lock the account for
+// everybody — so an operator who has such a proxy names it in
+// TRUSTED_PROXY_CIDRS and the address it reports is used instead.
+//
+// Only the last X-Forwarded-For entry is read. That is the one the trusted
+// proxy appended itself, so it is the one a client cannot dictate by sending a
+// header of its own; everything to the left of it is caller-supplied text and
+// is ignored. The cost of that choice is a chain of two or more proxies, which
+// reports the last hop rather than the original client — the safe direction to
+// be wrong in, because the alternative is trusting an attacker's header.
+func (s *Server) clientHost(request *http.Request) string {
 	host, _, err := net.SplitHostPort(request.RemoteAddr)
 	if err != nil {
 		host = request.RemoteAddr
 	}
-	return strings.ToLower(username) + "@" + host
+	if !s.isTrustedProxy(host) {
+		return host
+	}
+	forwarded := lastForwardedFor(request)
+	if forwarded == "" {
+		return host
+	}
+	return forwarded
+}
+
+func (s *Server) isTrustedProxy(host string) bool {
+	address := net.ParseIP(host)
+	if address == nil {
+		return false
+	}
+	for _, network := range s.config.TrustedProxyCIDRs {
+		if network.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastForwardedFor returns the final address in the header, in its canonical
+// form, or an empty string when there is not one. Anything that does not parse
+// as an address is discarded rather than passed on: the throttle map is keyed
+// on what this returns, and a header full of junk would otherwise fill it with
+// junk under a name that no longer means anything.
+func lastForwardedFor(request *http.Request) string {
+	values := request.Header.Values(forwardedForHeader)
+	if len(values) == 0 {
+		return ""
+	}
+	entries := strings.Split(values[len(values)-1], ",")
+	address := net.ParseIP(strings.TrimSpace(entries[len(entries)-1]))
+	if address == nil {
+		return ""
+	}
+	return address.String()
 }

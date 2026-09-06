@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -35,6 +36,10 @@ const (
 	// loopback or private, and nothing in these tests ever dials it.
 	scrapeHost = "203.0.113.10"
 	scrapePort = 2112
+
+	// maxLoginAttemptsForTest mirrors auth.maxLoginAttempts, which is not
+	// exported. A drift here shows up as a throttle test that stops throttling.
+	maxLoginAttemptsForTest = 5
 
 	testScrapeInterval = 15 * time.Second
 	defaultWindowSpan  = 24 * time.Hour
@@ -84,7 +89,9 @@ func (r response) sessionCookie(t *testing.T) *http.Cookie {
 	return nil
 }
 
-func newHarness(t *testing.T) *harness {
+// newHarness builds a dashboard on a temporary database. Options adjust the
+// configuration before anything reads it, for the settings a test is about.
+func newHarness(t *testing.T, options ...func(*config.Config)) *harness {
 	t.Helper()
 	directory := t.TempDir()
 	configuration := &config.Config{
@@ -97,6 +104,9 @@ func newHarness(t *testing.T) *harness {
 		SecureCookies:   config.SecureCookieAuto,
 		BackupKeepLast:  7,
 		SessionLifetime: 12 * time.Hour,
+	}
+	for _, option := range options {
+		option(configuration)
 	}
 
 	dataStore, err := store.Open(configuration.DatabasePath())
@@ -605,6 +615,25 @@ func TestSecurityHeadersArePresent(t *testing.T) {
 			}
 			if strings.Contains(answer.header.Get("Content-Security-Policy"), "unsafe-eval") {
 				t.Fatal("the content security policy allows unsafe-eval")
+			}
+
+			// The header is the only place the policy is declared — the page
+			// carried a second copy in a meta tag until it was removed, and a
+			// meta tag cannot express frame-ancestors at all. So the directives
+			// that were only ever in the header are pinned here: losing one
+			// would not break anything visible, and nothing else would notice.
+			policy := answer.header.Get("Content-Security-Policy")
+			for _, directive := range []string{
+				"frame-ancestors 'none'",
+				"object-src 'none'",
+				"font-src 'self'",
+				"base-uri 'none'",
+				"form-action 'self'",
+				"script-src 'self'",
+			} {
+				if !strings.Contains(policy, directive) {
+					t.Errorf("GET %s policy %q is missing %q", path, policy, directive)
+				}
 			}
 		})
 	}
@@ -1415,5 +1444,103 @@ func TestMachineOrderRouteIsNotSwallowedByTheIDRoute(t *testing.T) {
 	after.decode(t, &listed)
 	if len(listed) != 1 || listed[0].Name != "alpha" {
 		t.Fatalf("machines are %+v, want the one seeded machine unchanged", listed)
+	}
+}
+
+// loopbackProxy trusts the address httptest serves on, so a test can play the
+// part of the reverse proxy the README tells operators to put in front.
+func loopbackProxy(configuration *config.Config) {
+	_, loopback, err := net.ParseCIDR("127.0.0.0/8")
+	if err != nil {
+		panic(err)
+	}
+	configuration.TrustedProxyCIDRs = []*net.IPNet{loopback}
+}
+
+// failLogin sends one wrong password, claiming to come from forwardedFor when
+// that is not empty.
+func (h *harness) failLogin(forwardedFor string) response {
+	h.t.Helper()
+	headers := map[string]string{}
+	if forwardedFor != "" {
+		headers["X-Forwarded-For"] = forwardedFor
+	}
+	return h.send(http.MethodPost, "/api/login", "", credentials("not-the-password"), headers)
+}
+
+func TestLoginThrottleCountsTheClientTheTrustedProxyReports(t *testing.T) {
+	testHarness := newHarness(t, loopbackProxy)
+
+	// Every one of these arrives from 127.0.0.1 as far as the socket is
+	// concerned. Without a trusted proxy they would be one client; with one they
+	// are the address the proxy put in the header.
+	for attempt := 1; attempt <= maxLoginAttemptsForTest; attempt++ {
+		answer := testHarness.failLogin("203.0.113.9")
+		if answer.status != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d returned %d, want 401; body: %s", attempt, answer.status, answer.body)
+		}
+	}
+
+	locked := testHarness.failLogin("203.0.113.9")
+	if locked.status != http.StatusTooManyRequests {
+		t.Fatalf("attempt after the limit returned %d, want 429; body: %s", locked.status, locked.body)
+	}
+
+	// The whole point: the address that ran out of attempts is locked out, and
+	// nobody else is. Before this, one bad actor behind the proxy locked the
+	// only account there is for everyone behind it.
+	other := testHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword),
+		map[string]string{"X-Forwarded-For": "203.0.113.10"})
+	if other.status != http.StatusOK {
+		t.Fatalf("a different client behind the same proxy got %d, want 200; body: %s", other.status, other.body)
+	}
+}
+
+func TestLoginThrottleIgnoresForwardedHeaderFromAnUntrustedPeer(t *testing.T) {
+	// No TRUSTED_PROXY_CIDRS, which is the default and the direct-exposure case.
+	testHarness := newHarness(t)
+
+	// A different claimed address every time. If the header were believed, each
+	// would be a fresh client and the throttle would never trip.
+	for attempt := 1; attempt <= maxLoginAttemptsForTest; attempt++ {
+		answer := testHarness.failLogin(fmt.Sprintf("203.0.113.%d", attempt))
+		if answer.status != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d returned %d, want 401; body: %s", attempt, answer.status, answer.body)
+		}
+	}
+
+	locked := testHarness.failLogin("203.0.113.99")
+	if locked.status != http.StatusTooManyRequests {
+		t.Fatalf("a caller rotating X-Forwarded-For escaped the throttle: got %d, want 429; body: %s",
+			locked.status, locked.body)
+	}
+}
+
+func TestLoginThrottleReadsTheEntryTheProxyAppended(t *testing.T) {
+	testHarness := newHarness(t, loopbackProxy)
+
+	// What a real proxy produces when the caller sent a header of its own:
+	// the caller's text first, the address the proxy actually saw appended last.
+	// Only the last entry is ours to believe.
+	for attempt := 1; attempt <= maxLoginAttemptsForTest; attempt++ {
+		forged := fmt.Sprintf("198.51.100.%d, 203.0.113.9", attempt)
+		answer := testHarness.failLogin(forged)
+		if answer.status != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d returned %d, want 401; body: %s", attempt, answer.status, answer.body)
+		}
+	}
+
+	locked := testHarness.failLogin("198.51.100.200, 203.0.113.9")
+	if locked.status != http.StatusTooManyRequests {
+		t.Fatalf("a caller rewriting the front of X-Forwarded-For escaped the throttle: got %d, want 429; body: %s",
+			locked.status, locked.body)
+	}
+
+	// And a header with no usable address falls back to the socket address
+	// rather than becoming a throttle key of its own.
+	junk := testHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword),
+		map[string]string{"X-Forwarded-For": "not-an-address"})
+	if junk.status != http.StatusOK {
+		t.Fatalf("a junk X-Forwarded-For blocked a correct password: got %d; body: %s", junk.status, junk.body)
 	}
 }

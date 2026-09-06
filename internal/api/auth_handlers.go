@@ -31,7 +31,7 @@ func (s *Server) handleLogin(writer http.ResponseWriter, request *http.Request) 
 
 	token, session, user, err := s.auth.Login(
 		request.Context(), payload.Username, payload.Password,
-		clientKey(request, payload.Username),
+		s.clientKey(request, payload.Username),
 	)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		writeError(writer, http.StatusUnauthorized, "username or password is incorrect")
