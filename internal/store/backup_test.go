@@ -479,3 +479,460 @@ func TestListBackupsOnMissingDirectory(t *testing.T) {
 		t.Errorf("List created the backup directory: %v", err)
 	}
 }
+
+func TestApplyPendingRestoreKeepsTheDatabaseItReplaced(t *testing.T) {
+	store, manager, _ := newBackupManager(t, 5)
+	ctx := context.Background()
+	databasePath := manager.databasePath
+
+	createMachine(t, store, "before-backup")
+	info, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Work done after the snapshot. This is what a restore throws away, and what
+	// the operator who restored the wrong file needs back.
+	createMachine(t, store, "after-backup")
+
+	if err := manager.StageRestore(info.Name); err != nil {
+		t.Fatalf("StageRestore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before restore: %v", err)
+	}
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore: %v", err)
+	}
+
+	previous := databasePath + restorePreviousExt
+	if _, err := os.Stat(previous); err != nil {
+		t.Fatalf("the replaced database was not kept: %v", err)
+	}
+	if err := VerifyDatabaseFile(previous); err != nil {
+		t.Fatalf("the kept copy does not verify: %v", err)
+	}
+
+	// It has to be the database as it stood, not merely a file that opens: the
+	// point of keeping it is the work the restore discarded.
+	kept, err := Open(previous)
+	if err != nil {
+		t.Fatalf("open the kept copy: %v", err)
+	}
+	defer kept.Close()
+	keptMachines, err := kept.ListMachines(ctx)
+	if err != nil {
+		t.Fatalf("ListMachines on the kept copy: %v", err)
+	}
+	if len(keptMachines) != 2 {
+		t.Fatalf("the kept copy holds %d machines, want both", len(keptMachines))
+	}
+}
+
+func TestPreviousCopyCanBeRestoredToUndoARestore(t *testing.T) {
+	store, manager, _ := newBackupManager(t, 5)
+	ctx := context.Background()
+	databasePath := manager.databasePath
+
+	createMachine(t, store, "before-backup")
+	info, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	createMachine(t, store, "after-backup")
+
+	if err := manager.StageRestore(info.Name); err != nil {
+		t.Fatalf("StageRestore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before restore: %v", err)
+	}
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore: %v", err)
+	}
+
+	// The undo the README documents, walked end to end: the operator uploads
+	// endlessh.db.previous through "Restore from file" and gets their data back.
+	reopened, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("reopen after restore: %v", err)
+	}
+	undoManager := NewBackupManager(reopened, manager.directory, databasePath, 5)
+
+	previousFile, err := os.Open(databasePath + restorePreviousExt)
+	if err != nil {
+		t.Fatalf("open the kept copy: %v", err)
+	}
+	if err := undoManager.StageRestoreFromReader(previousFile); err != nil {
+		previousFile.Close()
+		t.Fatalf("stage the kept copy as an upload: %v", err)
+	}
+	previousFile.Close()
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close before the undo: %v", err)
+	}
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore(undo): %v", err)
+	}
+
+	undone, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("reopen after the undo: %v", err)
+	}
+	defer undone.Close()
+	machines, err := undone.ListMachines(ctx)
+	if err != nil {
+		t.Fatalf("ListMachines after the undo: %v", err)
+	}
+	if len(machines) != 2 {
+		t.Fatalf("after undoing the restore there are %d machines, want both back", len(machines))
+	}
+}
+
+func TestUndoingARestoreLeavesNoOrphanedLogsBehind(t *testing.T) {
+	store, manager, _ := newBackupManager(t, 5)
+	ctx := context.Background()
+	databasePath := manager.databasePath
+
+	createMachine(t, store, "alpha")
+	info, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.StageRestore(info.Name); err != nil {
+		t.Fatalf("StageRestore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before restore: %v", err)
+	}
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore: %v", err)
+	}
+
+	// The kept copy is a WAL-mode database, so uploading it — the undo the
+	// README documents — is the case that leaves logs beside the staged file and
+	// inside the backup directory. The data volume has no shell to sweep them
+	// out with, and a log left next to the next staged restore is a hazard, not
+	// just clutter.
+	reopened, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("reopen after restore: %v", err)
+	}
+	undoManager := NewBackupManager(reopened, manager.directory, databasePath, 5)
+	previousFile, err := os.Open(databasePath + restorePreviousExt)
+	if err != nil {
+		t.Fatalf("open the kept copy: %v", err)
+	}
+	if err := undoManager.StageRestoreFromReader(previousFile); err != nil {
+		previousFile.Close()
+		t.Fatalf("stage the kept copy as an upload: %v", err)
+	}
+	previousFile.Close()
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close before the undo: %v", err)
+	}
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore(undo): %v", err)
+	}
+
+	for _, orphan := range []string{
+		databasePath + restorePendingExt + "-wal",
+		databasePath + restorePendingExt + "-shm",
+	} {
+		if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s was left behind: %v", filepath.Base(orphan), err)
+		}
+	}
+
+	entries, err := os.ReadDir(manager.directory)
+	if err != nil {
+		t.Fatalf("read the backup directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "upload-") {
+			t.Errorf("an upload left %s in the backup directory", entry.Name())
+		}
+	}
+}
+
+func TestApplyPendingRestoreClearsAStaleLogBesideTheKeptCopy(t *testing.T) {
+	store, manager, _ := newBackupManager(t, 5)
+	ctx := context.Background()
+	databasePath := manager.databasePath
+	previous := databasePath + restorePreviousExt
+
+	createMachine(t, store, "alpha")
+	info, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.StageRestore(info.Name); err != nil {
+		t.Fatalf("StageRestore: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before restore: %v", err)
+	}
+
+	// A write-ahead log left by an earlier restore, belonging to a database that
+	// is about to be replaced. Left in place it would be read as this copy's own
+	// log, which is how a readable file becomes an unreadable one.
+	if err := os.WriteFile(previous+"-wal", []byte("a log from a different database"), backupFileMode); err != nil {
+		t.Fatalf("plant a stale log: %v", err)
+	}
+
+	if _, err := ApplyPendingRestore(databasePath); err != nil {
+		t.Fatalf("ApplyPendingRestore: %v", err)
+	}
+	if _, err := os.Stat(previous + "-wal"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a stale log survived beside the kept copy: %v", err)
+	}
+	if err := VerifyDatabaseFile(previous); err != nil {
+		t.Fatalf("the kept copy does not verify: %v", err)
+	}
+}
+
+func TestLatestMigrationVersionMatchesTheEmbeddedMigrations(t *testing.T) {
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+
+	// Derived independently of the function under test: whatever the highest
+	// numbered file in migrations/ is, that is the answer.
+	names, err := migrationNames()
+	if err != nil {
+		t.Fatalf("migrationNames: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("no migrations are embedded")
+	}
+	highest := 0
+	for _, name := range names {
+		version, err := migrationVersion(name)
+		if err != nil {
+			t.Fatalf("migrationVersion(%q): %v", name, err)
+		}
+		if version > highest {
+			highest = version
+		}
+	}
+	if latest != highest {
+		t.Errorf("LatestMigrationVersion = %d, want %d (from %v)", latest, highest, names)
+	}
+}
+
+func TestVerifyDatabaseFileRefusesANewerSchema(t *testing.T) {
+	store, path := newStore(t)
+	ctx := context.Background()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// A healthy database of ours, migrated by this build, is accepted.
+	if err := VerifyDatabaseFile(path); err != nil {
+		t.Fatalf("VerifyDatabaseFile on a current database: %v", err)
+	}
+
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+
+	// Now it claims a migration this build does not carry, which is what a
+	// backup taken by a later image looks like from here.
+	reopened, err := sql.Open(driverName, "file:"+path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := reopened.ExecContext(ctx,
+		"INSERT INTO schema_migrations (version, applied_at) VALUES (?, 0)", latest+1); err != nil {
+		reopened.Close()
+		t.Fatalf("record a future migration: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	err = VerifyDatabaseFile(path)
+	if err == nil {
+		t.Fatal("VerifyDatabaseFile accepted a database from a newer release")
+	}
+	if !errors.Is(err, ErrDatabaseTooNew) {
+		t.Errorf("error = %v, want it to be ErrDatabaseTooNew so the API can explain it", err)
+	}
+	// Both numbers belong in the message: without them the operator cannot tell
+	// which image wrote the file or which one is running.
+	for _, want := range []string{fmt.Sprint(latest + 1), fmt.Sprint(latest)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name version %s", err, want)
+		}
+	}
+}
+
+func TestRejectedRestoreLeavesNoLogWhereTheNextOneGoes(t *testing.T) {
+	store, manager, _ := newBackupManager(t, 5)
+	ctx := context.Background()
+	databasePath := manager.databasePath
+	pending := databasePath + restorePendingExt
+
+	createMachine(t, store, "alpha")
+	info, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.StageRestore(info.Name); err != nil {
+		t.Fatalf("StageRestore: %v", err)
+	}
+
+	// Make the staged file unacceptable the way a downgraded image would find
+	// it: a real database of ours, healthy, claiming a schema this build has
+	// never carried.
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		t.Fatalf("LatestMigrationVersion: %v", err)
+	}
+	staged, err := sql.Open(driverName, "file:"+pending)
+	if err != nil {
+		t.Fatalf("open the staged file: %v", err)
+	}
+	if _, err := staged.ExecContext(ctx,
+		"INSERT INTO schema_migrations (version, applied_at) VALUES (?, 0)", latest+1); err != nil {
+		staged.Close()
+		t.Fatalf("record a future migration: %v", err)
+	}
+	// In WAL mode, because that is what makes this test about logs at all:
+	// verifying a WAL-mode database writes a -wal and -shm beside it even when
+	// opened read-only, and an uploaded endlessh.db.previous is always one.
+	var journalMode string
+	if err := staged.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		staged.Close()
+		t.Fatalf("switch the staged file to WAL: %v", err)
+	}
+	if journalMode != "wal" {
+		staged.Close()
+		t.Fatalf("staged file is in %q mode, want wal", journalMode)
+	}
+	if err := staged.Close(); err != nil {
+		t.Fatalf("close the staged file: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close before restore: %v", err)
+	}
+
+	applied, err := ApplyPendingRestore(databasePath)
+	if err == nil {
+		t.Fatal("ApplyPendingRestore accepted a staged database from a newer release")
+	}
+	if applied {
+		t.Error("a rejected restore reported itself as applied")
+	}
+	if !errors.Is(err, ErrDatabaseTooNew) {
+		t.Errorf("error = %v, want it to be ErrDatabaseTooNew", err)
+	}
+
+	// Nothing may be left where the next staged restore is written.
+	for _, orphan := range []string{pending, pending + "-wal", pending + "-shm"} {
+		if _, statErr := os.Stat(orphan); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("%s survived a rejected restore: %v", filepath.Base(orphan), statErr)
+		}
+	}
+	// And the live database is untouched, so the next start comes up on it.
+	if err := VerifyDatabaseFile(databasePath); err != nil {
+		t.Errorf("the live database did not survive a rejected restore: %v", err)
+	}
+}
+
+// alignToSecondBoundary waits until a second has just ticked over, so what
+// follows has nearly a whole second before the backup name would change. Backup
+// names carry one second, and these tests are about what happens inside one.
+func alignToSecondBoundary() {
+	now := time.Now()
+	time.Sleep(time.Until(now.Truncate(time.Second).Add(time.Second)))
+}
+
+func TestCreateTwiceInOneSecondReturnsTheSameBackup(t *testing.T) {
+	_, manager, directory := newBackupManager(t, 5)
+	ctx := context.Background()
+
+	alignToSecondBoundary()
+	first, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	second, err := manager.Create(ctx)
+	if err != nil {
+		t.Fatalf("second Create in the same second: %v", err)
+	}
+
+	if first.Name != second.Name {
+		t.Skipf("the two calls straddled a second boundary (%s, %s); nothing to assert",
+			first.Name, second.Name)
+	}
+
+	// The same snapshot, described the same way both times — not an error for a
+	// file that exists and is current. A second click on "Back up now" is not a
+	// mistake the operator needs to be told about.
+	if second.Size != first.Size {
+		t.Errorf("size = %d, want the existing backup's %d", second.Size, first.Size)
+	}
+	if second.Size == 0 {
+		t.Error("the second call reported an empty backup")
+	}
+	assertBackupFileCount(t, directory, 1)
+}
+
+func TestCreateFromSeveralPlacesAtOnceNeverFails(t *testing.T) {
+	_, manager, directory := newBackupManager(t, 20)
+	ctx := context.Background()
+
+	// The maintenance worker and an operator clicking "Back up now" share this
+	// manager, so two calls really can overlap. They aim at the same filename
+	// within a second, and before they were serialised both got past the check
+	// that the file did not exist yet — leaving the loser with a SQLite error
+	// about a snapshot the winner was still writing.
+	const callers = 8
+	var wait sync.WaitGroup
+	names := make([]string, callers)
+	failures := make([]error, callers)
+	for index := range names {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			info, err := manager.Create(ctx)
+			names[index], failures[index] = info.Name, err
+		}(index)
+	}
+	wait.Wait()
+
+	for index, err := range failures {
+		if err != nil {
+			t.Errorf("caller %d: %v", index, err)
+		}
+	}
+	// Every name handed back has to be a backup that is really there and really
+	// readable, whether it was written by that caller or by whoever won.
+	for index, name := range names {
+		if name == "" {
+			t.Errorf("caller %d succeeded with no name", index)
+			continue
+		}
+		path := filepath.Join(directory, name)
+		if err := VerifyDatabaseFile(path); err != nil {
+			t.Errorf("caller %d was handed %s, which does not verify: %v", index, name, err)
+		}
+	}
+}
+
+func assertBackupFileCount(t *testing.T, directory string, want int) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read the backup directory: %v", err)
+	}
+	if len(entries) != want {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Errorf("backup files = %d %v, want %d", len(entries), names, want)
+	}
+}

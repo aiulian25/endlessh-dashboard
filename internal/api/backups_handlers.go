@@ -145,6 +145,13 @@ func (s *Server) writeBackupError(writer http.ResponseWriter, err error) bool {
 		writeError(writer, http.StatusNotFound, "that backup no longer exists")
 		return true
 	}
+	// Downgrading the image and then restoring a backup the newer one left
+	// behind is the way to arrive here, and the version numbers are the only
+	// useful thing to say about it.
+	if errors.Is(err, store.ErrDatabaseTooNew) {
+		writeError(writer, http.StatusConflict, err.Error())
+		return true
+	}
 	s.logger.Error("backup operation", "error", err)
 	writeError(writer, http.StatusInternalServerError, "the backup operation failed")
 	return true

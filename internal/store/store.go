@@ -104,17 +104,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	entries, err := fs.ReadDir(migrationFiles, migrationsDirectory)
+	names, err := migrationNames()
 	if err != nil {
-		return fmt.Errorf("read migrations: %w", err)
+		return err
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
 
 	for _, name := range names {
 		version, err := migrationVersion(name)
@@ -169,6 +162,42 @@ func (s *Store) applyMigration(ctx context.Context, version int, statements stri
 		return err
 	}
 	return transaction.Commit()
+}
+
+// migrationNames lists the embedded migrations in the order they are applied.
+func migrationNames() ([]string, error) {
+	entries, err := fs.ReadDir(migrationFiles, migrationsDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("read migrations: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// LatestMigrationVersion is the newest schema this build knows how to produce.
+// A database numbered above it was written by a later release, so it may hold
+// tables and columns this binary has never heard of — and Migrate would not
+// notice, because it only ever applies versions it does not already find.
+func LatestMigrationVersion() (int, error) {
+	names, err := migrationNames()
+	if err != nil {
+		return 0, err
+	}
+	latest := 0
+	for _, name := range names {
+		version, err := migrationVersion(name)
+		if err != nil {
+			return 0, err
+		}
+		latest = max(latest, version)
+	}
+	return latest, nil
 }
 
 func migrationVersion(name string) (int, error) {
