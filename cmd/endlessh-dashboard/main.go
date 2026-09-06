@@ -46,18 +46,22 @@ func main() {
 		"probe this container's own /healthz and exit 0 when healthy; used by the container healthcheck, which has no shell to call curl with")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Enough of a logger to report the two things that happen before there is a
+	// configuration to read a level from: a failed healthcheck, and a
+	// configuration that could not be loaded at all. Everything after that logs
+	// at the level LOG_LEVEL asks for.
+	bootstrapLogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if *healthcheck {
 		if err := probeHealth(); err != nil {
-			logger.Error("healthcheck failed", "error", err)
+			bootstrapLogger.Error("healthcheck failed", "error", err)
 			os.Exit(healthcheckFailureCode)
 		}
 		return
 	}
 
-	if err := run(logger); err != nil {
-		logger.Error("fatal", "error", err)
+	if err := run(); err != nil {
+		bootstrapLogger.Error("fatal", "error", err)
 		os.Exit(configurationErrorCode)
 	}
 }
@@ -86,11 +90,12 @@ func probeHealth() error {
 	return nil
 }
 
-func run(logger *slog.Logger) error {
+func run() error {
 	configuration, err := config.Load()
 	if err != nil {
 		return err
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: configuration.LogLevel}))
 
 	if err := os.MkdirAll(configuration.DataDirectory, dataDirectoryMode); err != nil {
 		return err

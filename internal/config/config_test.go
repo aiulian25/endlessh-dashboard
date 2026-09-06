@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -143,5 +144,150 @@ func TestSessionLifetimeIsConfigurableAndBounded(t *testing.T) {
 	t.Setenv(EnvSessionLifetime, "not-a-duration")
 	if _, err := Load(); err == nil {
 		t.Errorf("%s=not-a-duration was accepted, want a parse error", EnvSessionLifetime)
+	}
+}
+
+func TestBooleanSettingsRefuseSpellingsGoDoesNotUnderstand(t *testing.T) {
+	// Every boolean setting shares one parser, but each has its own call site,
+	// and a call site that drops the error is exactly the regression this pins.
+	settings := []struct {
+		env   string
+		value func(*Config) bool
+	}{
+		{env: EnvBackupDaily, value: func(c *Config) bool { return c.BackupDaily }},
+		{env: EnvScrapeBlockPrivate, value: func(c *Config) bool { return c.ScrapeBlockPrivate }},
+		{env: EnvGeoIPOnline, value: func(c *Config) bool { return c.GeoIPOnline }},
+	}
+
+	cases := []struct {
+		raw     string
+		want    bool
+		refused bool
+	}{
+		{raw: "true", want: true},
+		{raw: "TRUE", want: true},
+		{raw: "1", want: true},
+		{raw: "false", want: false},
+		{raw: "0", want: false},
+		// Empty is "not set", which is the documented default, not a mistake.
+		{raw: "", want: false},
+		// Spellings ParseBool has never accepted. Reading them as "off" is the
+		// bug: SCRAPE_BLOCK_PRIVATE=yes would leave the SSRF guard down while
+		// the .env file says it is up, and BACKUP_DAILY=yes would take no
+		// backups. Both now refuse to start instead.
+		{raw: "yes", refused: true},
+		{raw: "on", refused: true},
+		{raw: "enabled", refused: true},
+		{raw: "2", refused: true},
+	}
+
+	for _, setting := range settings {
+		for _, testCase := range cases {
+			t.Run(setting.env+"="+testCase.raw, func(t *testing.T) {
+				t.Setenv(EnvDataDirectory, t.TempDir())
+				t.Setenv(setting.env, testCase.raw)
+
+				configuration, err := Load()
+				if testCase.refused {
+					if err == nil {
+						t.Fatalf("Load accepted %s=%q, want it refused", setting.env, testCase.raw)
+					}
+					if !strings.Contains(err.Error(), setting.env) {
+						t.Errorf("error = %q, want it to name %s", err, setting.env)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Load with %s=%q: %v", setting.env, testCase.raw, err)
+				}
+				if got := setting.value(configuration); got != testCase.want {
+					t.Errorf("%s=%q loaded as %t, want %t", setting.env, testCase.raw, got, testCase.want)
+				}
+			})
+		}
+	}
+}
+
+func TestTrustedProxyCIDRsAreOffByDefaultAndValidated(t *testing.T) {
+	t.Setenv(EnvDataDirectory, t.TempDir())
+
+	// Unset means nobody is trusted to speak for a client, which is the right
+	// default for a dashboard reached directly.
+	unset, err := Load()
+	if err != nil {
+		t.Fatalf("Load with no %s: %v", EnvTrustedProxyCIDRs, err)
+	}
+	if len(unset.TrustedProxyCIDRs) != 0 {
+		t.Errorf("%s defaulted to %v, want nothing trusted", EnvTrustedProxyCIDRs, unset.TrustedProxyCIDRs)
+	}
+
+	t.Setenv(EnvTrustedProxyCIDRs, "127.0.0.1/32, 172.18.0.0/16")
+	configured, err := Load()
+	if err != nil {
+		t.Fatalf("Load with two proxies: %v", err)
+	}
+	if len(configured.TrustedProxyCIDRs) != 2 {
+		t.Fatalf("parsed %d networks, want 2", len(configured.TrustedProxyCIDRs))
+	}
+
+	// A bare address is the likely mistake, and it must not be read as "trust
+	// nothing" — that would leave the throttle broken with no sign of why.
+	for _, refused := range []string{"127.0.0.1", "not-a-network", "10.0.0.0/33"} {
+		t.Setenv(EnvTrustedProxyCIDRs, refused)
+		if _, err := Load(); err == nil {
+			t.Errorf("%s=%s was accepted, want it refused", EnvTrustedProxyCIDRs, refused)
+		}
+	}
+}
+
+func TestLogLevelIsNamedNotNumbered(t *testing.T) {
+	t.Setenv(EnvDataDirectory, t.TempDir())
+
+	// Unset is the level the app has always logged at, so an install that has
+	// never heard of this variable sees exactly what it saw before.
+	unset, err := Load()
+	if err != nil {
+		t.Fatalf("Load with no %s: %v", EnvLogLevel, err)
+	}
+	if unset.LogLevel != slog.LevelInfo {
+		t.Errorf("default log level = %v, want info", unset.LogLevel)
+	}
+
+	accepted := map[string]slog.Level{
+		"debug": slog.LevelDebug,
+		"info":  slog.LevelInfo,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
+		// Spelled the way somebody actually types it into a .env file.
+		"DEBUG": slog.LevelDebug,
+		" Warn": slog.LevelWarn,
+	}
+	for raw, want := range accepted {
+		t.Run("accepts "+raw, func(t *testing.T) {
+			t.Setenv(EnvDataDirectory, t.TempDir())
+			t.Setenv(EnvLogLevel, raw)
+			configuration, err := Load()
+			if err != nil {
+				t.Fatalf("Load with %s=%q: %v", EnvLogLevel, raw, err)
+			}
+			if configuration.LogLevel != want {
+				t.Errorf("%s=%q loaded as %v, want %v", EnvLogLevel, raw, configuration.LogLevel, want)
+			}
+		})
+	}
+
+	// slog's own numbers, and the spellings from other tools, are refused rather
+	// than silently logging at a level nobody chose — the same way every other
+	// setting in this file refuses what it does not understand.
+	for _, refused := range []string{"trace", "verbose", "warning", "0", "-4", "quiet"} {
+		t.Run("refuses "+refused, func(t *testing.T) {
+			t.Setenv(EnvDataDirectory, t.TempDir())
+			t.Setenv(EnvLogLevel, refused)
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%s was accepted", EnvLogLevel, refused)
+			} else if !strings.Contains(err.Error(), EnvLogLevel) {
+				t.Errorf("error = %q, want it to name %s", err, EnvLogLevel)
+			}
+		})
 	}
 }

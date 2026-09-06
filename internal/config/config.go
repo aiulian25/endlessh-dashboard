@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 const (
 	EnvListenAddress        = "LISTEN_ADDR"
+	EnvLogLevel             = "LOG_LEVEL"
 	EnvDataDirectory        = "DATA_DIR"
 	EnvScrapeInterval       = "SCRAPE_INTERVAL"
 	EnvScrapeTimeout        = "SCRAPE_TIMEOUT"
@@ -28,6 +30,7 @@ const (
 	EnvGeoIPOnlineRate      = "GEOIP_ONLINE_RATE_PER_MINUTE"
 	EnvGeoIPOnlineEndpoint  = "GEOIP_ONLINE_ENDPOINT"
 	EnvScrapeAllowlistCIDRs = "SCRAPE_ALLOWLIST_CIDRS"
+	EnvTrustedProxyCIDRs    = "TRUSTED_PROXY_CIDRS"
 	EnvScrapeBlockPrivate   = "SCRAPE_BLOCK_PRIVATE"
 	EnvBackupDaily          = "BACKUP_DAILY"
 	EnvBackupKeepLast       = "BACKUP_KEEP_LAST"
@@ -40,6 +43,7 @@ const (
 	defaultScrapeTimeout  = 5 * time.Second
 	defaultRetentionDays  = 90
 	defaultAdminUsername  = "admin"
+	defaultLogLevel       = slog.LevelInfo
 	defaultBackupKeepLast = 7
 
 	databaseFileName = "endlessh.db"
@@ -84,7 +88,11 @@ const (
 // session-signing key: sessions live in the database and are looked up by the
 // hash of a random token, so there is no secret to keep in step across restarts.
 type Config struct {
-	ListenAddress     string
+	ListenAddress string
+	// LogLevel is the floor for what reaches the container log. Debug is where
+	// the per-request line lives, which is the one worth reaching for when a
+	// proxy or a CSRF header is not behaving.
+	LogLevel          slog.Level
 	DataDirectory     string
 	ScrapeInterval    time.Duration
 	ScrapeTimeout     time.Duration
@@ -100,9 +108,13 @@ type Config struct {
 	GeoIPOnlineRate      int
 	GeoIPOnlineEndpoint  string
 	ScrapeAllowlistCIDRs []*net.IPNet
-	ScrapeBlockPrivate   bool
-	BackupDaily          bool
-	BackupKeepLast       int
+	// TrustedProxyCIDRs lists the addresses allowed to speak for a client other
+	// than themselves. Empty — the default — means the socket address is the
+	// client, which is the truth for a directly exposed dashboard.
+	TrustedProxyCIDRs  []*net.IPNet
+	ScrapeBlockPrivate bool
+	BackupDaily        bool
+	BackupKeepLast     int
 }
 
 func (c *Config) DatabasePath() string {
@@ -180,9 +192,23 @@ func Load() (*Config, error) {
 	}
 	config.BackupKeepLast = backupKeepLast
 
-	config.BackupDaily = boolValue(EnvBackupDaily, false)
-	config.ScrapeBlockPrivate = boolValue(EnvScrapeBlockPrivate, false)
-	config.GeoIPOnline = boolValue(EnvGeoIPOnline, false)
+	backupDaily, err := boolValue(EnvBackupDaily, false)
+	if err != nil {
+		return nil, err
+	}
+	config.BackupDaily = backupDaily
+
+	scrapeBlockPrivate, err := boolValue(EnvScrapeBlockPrivate, false)
+	if err != nil {
+		return nil, err
+	}
+	config.ScrapeBlockPrivate = scrapeBlockPrivate
+
+	geoIPOnline, err := boolValue(EnvGeoIPOnline, false)
+	if err != nil {
+		return nil, err
+	}
+	config.GeoIPOnline = geoIPOnline
 
 	onlineRate, err := intValue(EnvGeoIPOnlineRate, defaultGeoIPOnlineRate)
 	if err != nil {
@@ -208,11 +234,23 @@ func Load() (*Config, error) {
 	}
 	config.SecureCookies = secureCookies
 
+	logLevel, err := logLevelValue(EnvLogLevel, defaultLogLevel)
+	if err != nil {
+		return nil, err
+	}
+	config.LogLevel = logLevel
+
 	allowlist, err := cidrListValue(EnvScrapeAllowlistCIDRs)
 	if err != nil {
 		return nil, err
 	}
 	config.ScrapeAllowlistCIDRs = allowlist
+
+	trustedProxies, err := cidrListValue(EnvTrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
+	config.TrustedProxyCIDRs = trustedProxies
 
 	return config, nil
 }
@@ -249,16 +287,41 @@ func intValue(name string, fallback int) (int, error) {
 	return parsed, nil
 }
 
-func boolValue(name string, fallback bool) bool {
+// boolValue refuses a spelling ParseBool does not know rather than falling back
+// to the default. "yes" and "on" are the spellings people reach for, and two of
+// the three callers are safety switches: SCRAPE_BLOCK_PRIVATE read as "off"
+// would leave the SSRF guard down while the .env file says it is up.
+func boolValue(name string, fallback bool) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(name))
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	parsed, err := strconv.ParseBool(raw)
 	if err != nil {
-		return fallback
+		return false, fmt.Errorf("%s: %q must be true or false", name, raw)
 	}
-	return parsed
+	return parsed, nil
+}
+
+// logLevelValue reads the log floor by the names people write in a .env file
+// rather than slog's own numbers, and refuses anything else at startup instead
+// of quietly logging at a level nobody asked for.
+func logLevelValue(name string, fallback slog.Level) (slog.Level, error) {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if raw == "" {
+		return fallback, nil
+	}
+	switch raw {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return 0, fmt.Errorf("%s: %q must be debug, info, warn or error", name, raw)
 }
 
 func secureCookieValue(name string, fallback SecureCookieMode) (SecureCookieMode, error) {
