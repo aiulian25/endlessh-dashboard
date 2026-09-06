@@ -48,6 +48,8 @@ func NewWorker(
 }
 
 func (w *Worker) Run(ctx context.Context) {
+	w.seedLastBackup()
+
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
@@ -60,6 +62,41 @@ func (w *Worker) Run(ctx context.Context) {
 			w.runOnce(ctx)
 		}
 	}
+}
+
+// seedLastBackup carries the daily schedule across a restart. lastBackup lives
+// in memory, so without this every start looks like one where no backup has ever
+// been taken and writes one immediately — and because each new backup rotates an
+// old one out under BACKUP_KEEP_LAST, a few restarts in an afternoon replace the
+// daily history the setting exists to keep.
+//
+// The backups on disk are the record. Their names carry the time they were taken,
+// which is what List reads CreatedAt from.
+func (w *Worker) seedLastBackup() {
+	if !w.dailyBackup {
+		return
+	}
+	backups, err := w.backups.List()
+	if err != nil {
+		// Starting the schedule from nothing is what this replaces, not a new
+		// failure, so it is worth a line in the log and nothing more.
+		w.logger.Error("read the backup directory to resume the daily schedule", "error", err)
+		return
+	}
+
+	// Taken as a maximum rather than as the first entry: List happens to return
+	// newest first today, and this does not need to depend on that.
+	newest := time.Time{}
+	for _, backup := range backups {
+		if backup.CreatedAt.After(newest) {
+			newest = backup.CreatedAt
+		}
+	}
+	if newest.IsZero() {
+		return
+	}
+	w.lastBackup = newest
+	w.logger.Debug("resumed the daily backup schedule", "last_backup_at", newest)
 }
 
 func (w *Worker) runOnce(ctx context.Context) {
