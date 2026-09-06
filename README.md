@@ -283,10 +283,12 @@ are never written to logs.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:18222` | Address the HTTP server binds to. Keep the host part empty — `:18222` listens on every interface *inside the container*, which is what lets the published port reach it. Narrowing it to `127.0.0.1:18222` makes the container unreachable from anywhere, including your LAN. Control exposure with the compose `ports:` line instead. |
+| `LOG_LEVEL` | `info` | How much reaches the container log: `debug`, `info`, `warn` or `error`. `debug` adds one line per HTTP request — method, path, status and duration — which is what to reach for when a reverse proxy or a CSRF header is misbehaving. Only the path is logged, never the query string. Noticeable on a busy dashboard, so turn it on to look at something and off again. |
 | `DATA_DIR` | `/data` | Directory for `endlessh.db` and `backups/`. The only path the app writes to. |
 | `ADMIN_USERNAME` | `admin` | Seed admin account, created on first start only — changing it later does nothing, since it is read only while the account is being created. At most 64 **bytes** (not characters, so accented or non-Latin names reach the limit sooner); longer is refused at startup. Empty or blank falls back to `admin`. |
 | `ADMIN_PASSWORD` | *(required on first start)* | Seed password. Must be changed at first login; ignored once a user row exists. |
 | `SECURE_COOKIES` | `auto` | `auto` marks the session cookie `Secure` when the request arrived over TLS (directly or via `X-Forwarded-Proto`). `on` forces it, `off` disables it for local plain-HTTP testing only. |
+| `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated CIDRs of reverse proxies allowed to say who the client is. Empty means the address a request arrives from **is** the client, which is correct when the dashboard is reached directly. Behind a proxy every request arrives from one address, so without this the login throttle counts them all as a single client and five wrong passwords from anybody locks the account for everybody. Set it to the proxy's own address only — anything listed here is trusted to name the client. |
 | `SESSION_LIFETIME` | `12h` | How long a sign-in stays valid before you are logged out and asked for the password again. The clock starts at sign-in and does not slide with activity. Go duration string with no day unit — write `168h`, not `7d`. Minimum `1m`, maximum `720h`. |
 | `SCRAPE_INTERVAL` | `15s` | How often each enabled machine is polled. Go duration string. |
 | `SCRAPE_TIMEOUT` | `5s` | Total per-scrape timeout (2s connect). Redirects are never followed. |
@@ -542,6 +544,17 @@ A restore is applied atomically on restart and a corrupt file is refused rather 
 plainest disaster recovery, if the container will not start at all, is to stop it, replace
 `data/endlessh.db` with a backup file, and start it again.
 
+### Undoing a restore
+
+Restoring does not throw the old data away. The database as it stood immediately before the swap is
+kept as `/data/endlessh.db.previous`, in the same volume as everything else. If you restored the
+wrong snapshot, upload that file through **Settings → Backups → Restore from file** and you are back
+where you were, including everything recorded after the backup you restored.
+
+Only the most recent one is kept: a second restore overwrites it. So if the first restore was a
+mistake, undo it before restoring anything else — and note that the undo is itself a restore, which
+means it replaces `.previous` with the snapshot you are undoing.
+
 ## Scale ceiling
 
 Be honest with it and it will be boring and reliable. **Tens of machines at a 15-second interval are
@@ -686,14 +699,14 @@ Images are published to GitHub Container Registry with two kinds of tag:
 
 | Tag | Meaning |
 | --- | --- |
-| `ghcr.io/aiulian25/endlessh-dashboard:1.3.0` | An exact release. It never changes. |
+| `ghcr.io/aiulian25/endlessh-dashboard:1.4.0` | An exact release. It never changes. |
 | `ghcr.io/aiulian25/endlessh-dashboard:latest` | Whatever the newest release is. Moves every time one ships. |
 
 `latest` is the friendlier default and is what the quick start uses. Pin the version tag instead if
 you would rather decide for yourself when the container changes underneath you:
 
 ```yaml
-image: ghcr.io/aiulian25/endlessh-dashboard:1.3.0
+image: ghcr.io/aiulian25/endlessh-dashboard:1.4.0
 ```
 
 The database is migrated forward automatically on start, and every migration so far is additive.
