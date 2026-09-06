@@ -46,6 +46,11 @@ services:
     volumes:
       # The single writable path: holds endlessh.db and /data/backups.
       # A named volume survives `docker compose down` and image upgrades.
+      #
+      # Restoring a backup also leaves /data/endlessh.db.previous here: the
+      # database as it stood immediately before the restore. Restored the wrong
+      # snapshot? Upload that file through Settings -> Backups -> Restore from
+      # file to put it back. Only the most recent one is kept.
       - endlessh-data:/data
 
       # Optional offline GeoIP. Mount a MaxMind GeoLite2 database read-only and

@@ -61,7 +61,7 @@ docker-build: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
 .PHONY: docker-run
-docker-run: ## Run the image with the same hardening as docker-compose.dev.yml
+docker-run: ## Run the image with the same hardening as docker-compose.yml
 	docker run --rm \
 		--name $(BINARY) \
 		--env-file .env \

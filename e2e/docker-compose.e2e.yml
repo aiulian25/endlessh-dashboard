@@ -29,16 +29,21 @@ services:
       DATA_DIR: /data
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: e2e-seed-password
-      SESSION_KEY: e2e-session-key-not-a-real-secret
-      COOKIE_SECURE: "false"
+      # The suite talks plain HTTP to 127.0.0.1, so the Secure flag has to stay
+      # off or the browser-shaped client in smoke_test.go would drop the session
+      # cookie and every authenticated call after login would 401. Pinned rather
+      # than left to the auto default, so a change to that default surfaces in
+      # the config tests where it belongs and not as a mystery here.
+      SECURE_COOKIES: "off"
       SCRAPE_INTERVAL: 5s
       SCRAPE_BLOCK_PRIVATE: "false"
+      BACKUP_DAILY: "false"
+      TZ: UTC
+
       # GEOIP_ONLINE is deliberately absent and must stay that way: it would have
       # every e2e run post attacker addresses to a third party from whatever host
       # the suite happens to run on. assertGeography in smoke_test.go fails if it
       # is ever switched on, here or by a changed default.
-      BACKUP_DAILY_ENABLED: "false"
-      TZ: UTC
     ports:
       - "127.0.0.1:18222:18222"
     read_only: true

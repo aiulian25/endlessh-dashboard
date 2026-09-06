@@ -13,7 +13,7 @@ docker-compose.override.yml
 
 # Release and working notes. Not part of the product.
 docs/Push.md
-CODE_REVIEW_REPORT.md
+CODE_REVIEW_REPORT*.md
 TESTING.md
 NOTES.md
 TODO.md
@@ -30,6 +30,7 @@ backups/
 *.db-shm
 *.db.restore
 *.db.restore.rejected
+*.db.previous
 
 # A GeoIP database is licensed to whoever downloaded it and is never
 # redistributed with this project.
