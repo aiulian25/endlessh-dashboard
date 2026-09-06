@@ -25,8 +25,9 @@ type Overview struct {
 	TrappedNow             int64
 	MachineCount           int
 	// UniqueAttackers counts the addresses seen inside the window, unlike
-	// AttackersTrapped, which is the lifetime figure, and
-	// AttackersTrappedDelta, which counts only the ones first met in it.
+	// AttackersTrapped, which counts every address still inside the retention
+	// window, and AttackersTrappedDelta, which counts only the ones first met
+	// in the display window.
 	UniqueAttackers int64
 	Countries       int
 }

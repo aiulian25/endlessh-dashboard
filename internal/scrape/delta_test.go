@@ -1,7 +1,9 @@
 package scrape
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -629,5 +632,82 @@ func TestPollerRefusesBlockedTarget(t *testing.T) {
 	}
 	if attackers := countRows(t, dataStore, "SELECT COUNT(*) FROM attackers WHERE machine_id = ?", machine.ID); attackers != 0 {
 		t.Errorf("attackers = %d, want 0", attackers)
+	}
+}
+
+// hostileStatusLine serves one thing: an HTTP response whose status line carries
+// an enormous reason phrase. net/http/httptest cannot do this — a ResponseWriter
+// derives the phrase from the code — so the response is written as raw bytes,
+// which is also exactly how a hostile endpoint would do it.
+func hostileStatusLine(t *testing.T, reasonPhrase string) (string, int) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(connection net.Conn) {
+				defer connection.Close()
+				// The request has to be drained before answering, or the client
+				// sees the connection go away rather than the response.
+				reader := bufio.NewReader(connection)
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil || line == "\r\n" || line == "\n" {
+						break
+					}
+				}
+				fmt.Fprintf(connection, "HTTP/1.1 500 %s\r\nContent-Length: 0\r\n\r\n", reasonPhrase)
+			}(connection)
+		}
+	}()
+
+	address := listener.Addr().(*net.TCPAddr)
+	return address.IP.String(), address.Port
+}
+
+func TestScrapeFailureFromAHostileEndpointIsBounded(t *testing.T) {
+	dataStore := newTestStore(t)
+	poller := newTestPoller(t, dataStore)
+	ctx := context.Background()
+
+	host, port := hostileStatusLine(t, strings.Repeat("A", 8000))
+	machine, err := dataStore.CreateMachine(ctx, store.Machine{
+		Name:        "hostile",
+		Host:        host,
+		Port:        port,
+		MetricsPath: "/metrics",
+		Enabled:     true,
+	})
+	if err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	poller.pollOne(ctx, machine)
+
+	// The whole chain: the endpoint chooses the text, the poller quotes it into
+	// the failure message, and the store decides how much of it is kept. Without
+	// that last step the machine row, and every /api/machines response, carries
+	// as much as the endpoint felt like sending.
+	failed, err := dataStore.GetMachine(ctx, machine.ID)
+	if err != nil {
+		t.Fatalf("GetMachine: %v", err)
+	}
+	if failed.ConsecutiveFailures != 1 {
+		t.Fatalf("consecutive failures = %d, want the scrape to have failed once", failed.ConsecutiveFailures)
+	}
+	if len(failed.LastError) > 512 {
+		t.Errorf("stored error is %d bytes; the endpoint chose the length", len(failed.LastError))
+	}
+	if !strings.Contains(failed.LastError, "500") {
+		t.Errorf("stored error = %q, want it to still say what happened", failed.LastError)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // baseTime is a fixed, minute-aligned instant so bucket maths in the tests is
@@ -96,6 +97,20 @@ func scanText(t *testing.T, store *Store, query string, args ...any) string {
 		t.Fatalf("query %q: %v", query, err)
 	}
 	return value
+}
+
+// seedCounterStates writes a counter baseline the way the poller does, which is
+// the only way there is: the baseline travels inside the scrape it was measured
+// against so the two cannot be committed apart.
+func seedCounterStates(t *testing.T, store *Store, machineID int64, states map[string]float64, at time.Time) {
+	t.Helper()
+	if err := store.ApplyScrape(context.Background(), ScrapeDelta{
+		MachineID:     machineID,
+		At:            at,
+		CounterStates: states,
+	}); err != nil {
+		t.Fatalf("ApplyScrape(counter states): %v", err)
+	}
 }
 
 func assertFloat(t *testing.T, label string, got, want float64) {
@@ -388,12 +403,8 @@ func TestCounterStatesRoundTrip(t *testing.T) {
 		SeriesPrefixTotal + "bytes_sent": 4096.5,
 		SeriesPrefixClient + "1.2.3.4":   7,
 	}
-	if err := store.SaveCounterStates(ctx, machine.ID, states, baseTime); err != nil {
-		t.Fatalf("SaveCounterStates: %v", err)
-	}
-	if err := store.SaveCounterStates(ctx, other.ID, map[string]float64{"total:opens": 99}, baseTime); err != nil {
-		t.Fatalf("SaveCounterStates for other machine: %v", err)
-	}
+	seedCounterStates(t, store, machine.ID, states, baseTime)
+	seedCounterStates(t, store, other.ID, map[string]float64{"total:opens": 99}, baseTime)
 
 	loaded, err := store.LoadCounterStates(ctx, machine.ID)
 	if err != nil {
@@ -407,9 +418,7 @@ func TestCounterStatesRoundTrip(t *testing.T) {
 	}
 
 	states[SeriesPrefixTotal+"opens"] = 20
-	if err := store.SaveCounterStates(ctx, machine.ID, states, baseTime.Add(time.Minute)); err != nil {
-		t.Fatalf("SaveCounterStates update: %v", err)
-	}
+	seedCounterStates(t, store, machine.ID, states, baseTime.Add(time.Minute))
 	loaded, err = store.LoadCounterStates(ctx, machine.ID)
 	if err != nil {
 		t.Fatalf("LoadCounterStates after update: %v", err)
@@ -1278,4 +1287,291 @@ func TestSessions(t *testing.T) {
 		scanInt(t, store, "SELECT COUNT(*) FROM sessions WHERE user_id = ?", user.ID), 0)
 	assertInt(t, "other user's session survives",
 		scanInt(t, store, "SELECT COUNT(*) FROM sessions WHERE user_id = ?", other.ID), 1)
+}
+
+func TestApplyScrapeCommitsCounterBaselineWithTheDelta(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	baseline := map[string]float64{
+		SeriesPrefixTotal + "opens":    140,
+		SeriesPrefixClient + "1.2.3.4": 9,
+	}
+	if err := store.ApplyScrape(ctx, ScrapeDelta{
+		MachineID:      machine.ID,
+		At:             baseTime,
+		Opens:          40,
+		Closes:         3,
+		BytesSent:      2048,
+		TrappedSeconds: 61.5,
+		Attackers: []AttackerDelta{
+			{IPAddress: "1.2.3.4", Connections: 9, TrappedSeconds: 61.5, Active: true},
+		},
+		CounterStates: baseline,
+	}); err != nil {
+		t.Fatalf("ApplyScrape: %v", err)
+	}
+
+	// One call, one transaction: the history moved and so did the baseline the
+	// next scrape measures against. Before these were committed separately, an
+	// interruption between them left the delta applied and the baseline behind,
+	// and the next scrape counted the same traffic a second time.
+	assertInt(t, "totals opens", scanInt(t, store,
+		"SELECT opens FROM machine_totals WHERE machine_id = ?", machine.ID), 40)
+	assertInt(t, "rollup bytes sent", scanInt(t, store,
+		"SELECT bytes_sent FROM machine_rollups WHERE machine_id = ?", machine.ID), 2048)
+
+	states, err := store.LoadCounterStates(ctx, machine.ID)
+	if err != nil {
+		t.Fatalf("LoadCounterStates: %v", err)
+	}
+	if len(states) != len(baseline) {
+		t.Fatalf("stored %d series, want %d", len(states), len(baseline))
+	}
+	for series, want := range baseline {
+		assertFloat(t, "baseline "+series, states[series], want)
+	}
+}
+
+func TestApplyScrapeWritesNothingWhenTheTransactionFails(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	// A scrape for a machine that is not there fails on the foreign key. The
+	// point is what is left behind: nothing, so the next run applies the scrape
+	// once rather than finding half of it already recorded.
+	unknownMachineID := machine.ID + 9999
+	err := store.ApplyScrape(ctx, ScrapeDelta{
+		MachineID:     unknownMachineID,
+		At:            baseTime,
+		Opens:         40,
+		CounterStates: map[string]float64{SeriesPrefixTotal + "opens": 140},
+	})
+	if err == nil {
+		t.Fatal("ApplyScrape accepted a delta for a machine that does not exist")
+	}
+
+	states, loadErr := store.LoadCounterStates(ctx, unknownMachineID)
+	if loadErr != nil {
+		t.Fatalf("LoadCounterStates: %v", loadErr)
+	}
+	if len(states) != 0 {
+		t.Errorf("a failed scrape left %d counter states behind: %v", len(states), states)
+	}
+	assertInt(t, "rollup rows left by a failed scrape", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_rollups WHERE machine_id = ?", unknownMachineID), 0)
+}
+
+func TestApplyScrapeRollsBackTheDeltaWhenTheBaselineCannotBeStored(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	// A NaN reading is the failure that reaches the end of the transaction:
+	// SQLite stores NaN as NULL, which counter_states.value refuses. The
+	// Prometheus text format allows NaN, so a broken tarpit really can send one.
+	//
+	// What is being asserted is the ordering guarantee, not the arithmetic: the
+	// deltas above it must go back too. While the baseline was committed
+	// separately, this scrape landed in the history with no baseline to match
+	// it, and the next scrape counted the same traffic again.
+	err := store.ApplyScrape(ctx, ScrapeDelta{
+		MachineID:      machine.ID,
+		At:             baseTime,
+		Opens:          40,
+		BytesSent:      2048,
+		TrappedSeconds: 61.5,
+		Attackers: []AttackerDelta{
+			{IPAddress: "1.2.3.4", Connections: 9, TrappedSeconds: 61.5, Active: true},
+		},
+		CounterStates: map[string]float64{SeriesPrefixTotal + "opens": math.NaN()},
+	})
+	if err == nil {
+		t.Fatal("ApplyScrape accepted a counter reading the database cannot store")
+	}
+
+	assertInt(t, "rollup rows after a rolled-back scrape", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_rollups WHERE machine_id = ?", machine.ID), 0)
+	assertInt(t, "totals opens after a rolled-back scrape", scanInt(t, store,
+		"SELECT opens FROM machine_totals WHERE machine_id = ?", machine.ID), 0)
+	assertInt(t, "attacker rows after a rolled-back scrape", scanInt(t, store,
+		"SELECT COUNT(*) FROM attackers WHERE machine_id = ?", machine.ID), 0)
+
+	states, loadErr := store.LoadCounterStates(ctx, machine.ID)
+	if loadErr != nil {
+		t.Fatalf("LoadCounterStates: %v", loadErr)
+	}
+	if len(states) != 0 {
+		t.Errorf("a rolled-back scrape left %d counter states behind", len(states))
+	}
+}
+
+func TestCreateMachineOpensItsLifetimeTotals(t *testing.T) {
+	store, _ := newStore(t)
+	machine := createMachine(t, store, "alpha")
+
+	// Without this row the machine still lists and still scrapes, and every
+	// lifetime figure it reports stays at zero for ever, because ApplyScrape
+	// updates a row that is not there and SQLite calls that a success.
+	assertInt(t, "totals rows for the new machine", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_totals WHERE machine_id = ?", machine.ID), 1)
+	assertInt(t, "opens on a fresh machine", scanInt(t, store,
+		"SELECT opens FROM machine_totals WHERE machine_id = ?", machine.ID), 0)
+}
+
+func TestCreateMachineLeavesNothingBehindWhenTheTotalsRowFails(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+
+	// The only way the second insert can fail on a database this healthy is if
+	// something refuses it, so the test supplies the refusal. What is being
+	// asserted is the rollback: while these were two statements, the machine row
+	// survived on its own and the operator got an error for a machine that had
+	// in fact been created, minus the totals it needed.
+	if _, err := store.database.ExecContext(ctx,
+		`CREATE TRIGGER refuse_machine_totals BEFORE INSERT ON machine_totals
+		 BEGIN SELECT RAISE(ABORT, 'totals refused'); END`); err != nil {
+		t.Fatalf("create the refusing trigger: %v", err)
+	}
+
+	if _, err := store.CreateMachine(ctx, Machine{
+		Name:        "alpha",
+		Host:        "203.0.113.10",
+		Port:        2112,
+		MetricsPath: "/metrics",
+		Enabled:     true,
+	}); err == nil {
+		t.Fatal("CreateMachine reported success though the totals row was refused")
+	}
+
+	assertInt(t, "orphaned machine rows", scanInt(t, store,
+		"SELECT COUNT(*) FROM machines WHERE name = 'alpha'"), 0)
+
+	// And the failure is not sticky: with the refusal gone the same name is free
+	// to use, rather than colliding with a half-created machine nobody can see.
+	if _, err := store.database.ExecContext(ctx, "DROP TRIGGER refuse_machine_totals"); err != nil {
+		t.Fatalf("drop the refusing trigger: %v", err)
+	}
+	retried := createMachine(t, store, "alpha")
+	assertInt(t, "totals rows after the retry", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_totals WHERE machine_id = ?", retried.ID), 1)
+}
+
+func TestApplyScrapeRestoresAMissingTotalsRow(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	// The state this heals: a machine registered before creation was one
+	// transaction, or restored from a database written before the totals row
+	// existed. Nothing about it looks broken — the overview sums the rows it
+	// finds with COALESCE, so a machine with no row reads as an idle one.
+	if _, err := store.database.ExecContext(ctx,
+		"DELETE FROM machine_totals WHERE machine_id = ?", machine.ID); err != nil {
+		t.Fatalf("remove the totals row: %v", err)
+	}
+	assertInt(t, "totals rows before the scrape", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_totals WHERE machine_id = ?", machine.ID), 0)
+
+	applyScrape(t, store, ScrapeDelta{
+		MachineID:      machine.ID,
+		At:             baseTime,
+		Opens:          7,
+		Closes:         2,
+		BytesSent:      512,
+		TrappedSeconds: 30.5,
+	})
+
+	assertInt(t, "totals rows after the scrape", scanInt(t, store,
+		"SELECT COUNT(*) FROM machine_totals WHERE machine_id = ?", machine.ID), 1)
+	assertInt(t, "opens", scanInt(t, store,
+		"SELECT opens FROM machine_totals WHERE machine_id = ?", machine.ID), 7)
+	assertInt(t, "closes", scanInt(t, store,
+		"SELECT closes FROM machine_totals WHERE machine_id = ?", machine.ID), 2)
+	assertInt(t, "bytes sent", scanInt(t, store,
+		"SELECT bytes_sent FROM machine_totals WHERE machine_id = ?", machine.ID), 512)
+	assertFloat(t, "trapped seconds", scanFloat(t, store,
+		"SELECT trapped_seconds FROM machine_totals WHERE machine_id = ?", machine.ID), 30.5)
+
+	// And a healed row keeps accumulating rather than being replaced by the
+	// next scrape's figures.
+	applyScrape(t, store, ScrapeDelta{
+		MachineID: machine.ID,
+		At:        baseTime.Add(time.Minute),
+		Opens:     3,
+		BytesSent: 100,
+	})
+	assertInt(t, "opens after a second scrape", scanInt(t, store,
+		"SELECT opens FROM machine_totals WHERE machine_id = ?", machine.ID), 10)
+	assertInt(t, "bytes sent after a second scrape", scanInt(t, store,
+		"SELECT bytes_sent FROM machine_totals WHERE machine_id = ?", machine.ID), 612)
+}
+
+func TestRecordScrapeFailureBoundsTheStoredMessage(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	readLastError := func() string {
+		t.Helper()
+		reloaded, err := store.GetMachine(ctx, machine.ID)
+		if err != nil {
+			t.Fatalf("GetMachine: %v", err)
+		}
+		return reloaded.LastError
+	}
+
+	// A short message is the normal case and must arrive intact — the point is a
+	// ceiling, not a haircut.
+	ordinary := "metrics endpoint returned 502 Bad Gateway"
+	if err := store.RecordScrapeFailure(ctx, machine.ID, baseTime, ordinary); err != nil {
+		t.Fatalf("RecordScrapeFailure: %v", err)
+	}
+	if got := readLastError(); got != ordinary {
+		t.Errorf("stored %q, want the message unchanged", got)
+	}
+
+	// What a hostile or broken endpoint can send: the reason phrase on its own
+	// status line, which this app copies into the message and then onto the
+	// machine card and into every /api/machines response.
+	huge := "metrics endpoint returned 500 " + strings.Repeat("A", 10000)
+	if err := store.RecordScrapeFailure(ctx, machine.ID, baseTime, huge); err != nil {
+		t.Fatalf("RecordScrapeFailure with a huge message: %v", err)
+	}
+	stored := readLastError()
+	if len(stored) > maxLastErrorLength {
+		t.Errorf("stored %d bytes, want at most %d", len(stored), maxLastErrorLength)
+	}
+	if !strings.HasPrefix(stored, "metrics endpoint returned 500 ") {
+		t.Errorf("stored %q, want the front of the message kept", stored)
+	}
+}
+
+func TestRecordScrapeFailureNeverSplitsACharacter(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	// Three bytes per character, so a byte-counted cut lands mid-character
+	// unless it steps back. What would be stored then is not text any more, and
+	// it travels straight into a JSON response and onto the page.
+	if err := store.RecordScrapeFailure(ctx, machine.ID, baseTime,
+		strings.Repeat("水", 4000)); err != nil {
+		t.Fatalf("RecordScrapeFailure: %v", err)
+	}
+	stored, err := store.GetMachine(ctx, machine.ID)
+	if err != nil {
+		t.Fatalf("GetMachine: %v", err)
+	}
+	if len(stored.LastError) > maxLastErrorLength {
+		t.Errorf("stored %d bytes, want at most %d", len(stored.LastError), maxLastErrorLength)
+	}
+	if !utf8.ValidString(stored.LastError) {
+		t.Errorf("stored %q, which is not valid UTF-8", stored.LastError)
+	}
+	if strings.ContainsRune(stored.LastError, utf8.RuneError) {
+		t.Error("a character was split in half rather than dropped")
+	}
 }

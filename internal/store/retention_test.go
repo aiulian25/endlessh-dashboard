@@ -81,16 +81,12 @@ func TestPruneKeepsAggregateCounterStates(t *testing.T) {
 		SeriesPrefixTotal + "opens":     100,
 		SeriesPrefixTotal + "bytes":     200,
 	}
-	if err := store.SaveCounterStates(ctx, machine.ID, staleStates, stale); err != nil {
-		t.Fatalf("SaveCounterStates(stale): %v", err)
-	}
+	seedCounterStates(t, store, machine.ID, staleStates, stale)
 	freshStates := map[string]float64{
 		SeriesPrefixClient + "10.0.0.9": 7,
 		SeriesPrefixTotal + "closes":    300,
 	}
-	if err := store.SaveCounterStates(ctx, machine.ID, freshStates, fresh); err != nil {
-		t.Fatalf("SaveCounterStates(fresh): %v", err)
-	}
+	seedCounterStates(t, store, machine.ID, freshStates, fresh)
 
 	stats, err := store.Prune(ctx, cutoff)
 	if err != nil {

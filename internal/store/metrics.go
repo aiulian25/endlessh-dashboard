@@ -36,6 +36,12 @@ type ScrapeDelta struct {
 	BytesSent      int64
 	TrappedSeconds float64
 	Attackers      []AttackerDelta
+	// CounterStates is the raw counter reading this scrape saw, which becomes
+	// the baseline the next one subtracts from. It travels with the deltas
+	// because the two only mean anything together: a baseline stored without
+	// its delta loses a scrape, and a delta stored without its baseline applies
+	// the same scrape again on the next run and over-counts it for good.
+	CounterStates map[string]float64
 }
 
 func (s *Store) LoadCounterStates(ctx context.Context, machineID int64) (map[string]float64, error) {
@@ -60,12 +66,10 @@ func (s *Store) LoadCounterStates(ctx context.Context, machineID int64) (map[str
 	return states, rows.Err()
 }
 
-func (s *Store) SaveCounterStates(ctx context.Context, machineID int64, states map[string]float64, at time.Time) error {
-	transaction, err := s.database.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+func saveCounterStates(ctx context.Context, transaction *sql.Tx, machineID int64, states map[string]float64, at time.Time) error {
+	if len(states) == 0 {
+		return nil
 	}
-	defer transaction.Rollback()
 
 	statement, err := transaction.PrepareContext(ctx,
 		`INSERT INTO counter_states (machine_id, series, value, updated_at)
@@ -81,11 +85,14 @@ func (s *Store) SaveCounterStates(ctx context.Context, machineID int64, states m
 			return fmt.Errorf("save counter states: %w", err)
 		}
 	}
-	return transaction.Commit()
+	return nil
 }
 
-// ApplyScrape writes one scrape's deltas: the minute rollup, the lifetime
-// totals, and every attacker the scrape touched, in a single transaction.
+// ApplyScrape writes everything one scrape produced in a single transaction:
+// the minute rollup, the lifetime totals, every attacker it touched, and the
+// counter baseline the next scrape will measure against. All of it lands or
+// none of it does, so an interrupted scrape is retried in full rather than
+// applied twice.
 func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 	transaction, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -109,14 +116,21 @@ func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 			return fmt.Errorf("write rollup: %w", err)
 		}
 
+		// Insert-on-conflict rather than a bare UPDATE: an UPDATE that matches
+		// no row is not an error in SQLite, it is a silent no-op, so a machine
+		// whose totals row went missing — created before this was written in one
+		// transaction, or restored from a database old enough to predate the row
+		// — would report zero lifetime figures for ever and never say why. This
+		// way the next scrape with traffic in it puts the row back.
 		if _, err := transaction.ExecContext(ctx,
-			`UPDATE machine_totals SET
-				opens = opens + ?,
-				closes = closes + ?,
-				bytes_sent = bytes_sent + ?,
-				trapped_seconds = trapped_seconds + ?
-			 WHERE machine_id = ?`,
-			delta.Opens, delta.Closes, delta.BytesSent, delta.TrappedSeconds, delta.MachineID); err != nil {
+			`INSERT INTO machine_totals (machine_id, opens, closes, bytes_sent, trapped_seconds)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(machine_id) DO UPDATE SET
+				opens = opens + excluded.opens,
+				closes = closes + excluded.closes,
+				bytes_sent = bytes_sent + excluded.bytes_sent,
+				trapped_seconds = trapped_seconds + excluded.trapped_seconds`,
+			delta.MachineID, delta.Opens, delta.Closes, delta.BytesSent, delta.TrappedSeconds); err != nil {
 			return fmt.Errorf("write totals: %w", err)
 		}
 	}
@@ -125,6 +139,10 @@ func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 		if err := upsertAttacker(ctx, transaction, delta.MachineID, delta.At, attacker); err != nil {
 			return err
 		}
+	}
+
+	if err := saveCounterStates(ctx, transaction, delta.MachineID, delta.CounterStates, delta.At); err != nil {
+		return err
 	}
 	return transaction.Commit()
 }

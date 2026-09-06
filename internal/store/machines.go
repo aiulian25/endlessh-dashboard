@@ -7,7 +7,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+// maxLastErrorLength bounds what is kept from a failed scrape. The message
+// quotes the remote endpoint's own status line and, after a refused redirect,
+// its URL — so how long it is, is decided by the machine being scraped rather
+// than by this app. It is stored on the machine row and returned in every
+// /api/machines response, which is a lot of places for somebody else to choose
+// the size of. 512 bytes is far more than any real error needs.
+const maxLastErrorLength = 512
 
 var ErrMachineNotFound = errors.New("machine not found")
 
@@ -131,9 +140,19 @@ func (s *Store) UsedColours(ctx context.Context) (map[string]int, error) {
 	return used, rows.Err()
 }
 
+// CreateMachine registers a machine and opens its lifetime totals. One
+// transaction, because a machine without a totals row is worse than no machine
+// at all: nothing errors, the sidebar lists it, and every lifetime figure it
+// reports stays at zero for as long as it exists.
 func (s *Store) CreateMachine(ctx context.Context, machine Machine) (Machine, error) {
+	transaction, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return Machine{}, fmt.Errorf("create machine: %w", err)
+	}
+	defer transaction.Rollback()
+
 	machine.CreatedAt = time.Now().UTC()
-	result, err := s.database.ExecContext(ctx,
+	result, err := transaction.ExecContext(ctx,
 		`INSERT INTO machines (name, host, port, metrics_path, group_label, enabled, created_at, colour)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		machine.Name, machine.Host, machine.Port, machine.MetricsPath,
@@ -150,9 +169,12 @@ func (s *Store) CreateMachine(ctx context.Context, machine Machine) (Machine, er
 	}
 	machine.ID = id
 
-	if _, err := s.database.ExecContext(ctx,
+	if _, err := transaction.ExecContext(ctx,
 		"INSERT INTO machine_totals (machine_id) VALUES (?)", id); err != nil {
 		return Machine{}, fmt.Errorf("create machine totals: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return Machine{}, fmt.Errorf("create machine: %w", err)
 	}
 	return machine, nil
 }
@@ -201,7 +223,7 @@ func (s *Store) RecordScrapeFailure(ctx context.Context, id int64, at time.Time,
 		`UPDATE machines
 		 SET last_scrape_at = ?, consecutive_failures = consecutive_failures + 1, last_error = ?
 		 WHERE id = ?`,
-		at.Unix(), message, id)
+		at.Unix(), truncateToBytes(message, maxLastErrorLength), id)
 	if err != nil {
 		return fmt.Errorf("record scrape failure: %w", err)
 	}
@@ -246,4 +268,19 @@ func requireOneRow(result sql.Result, notFound error) error {
 
 func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// truncateToBytes cuts a string to at most limit bytes, stepping back to a rune
+// boundary rather than through one. A byte limit is what actually bounds a row
+// and a JSON response; splitting a multi-byte character to reach it exactly
+// would store something that is no longer text.
+func truncateToBytes(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }

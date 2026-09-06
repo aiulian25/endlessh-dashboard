@@ -306,10 +306,11 @@ func (p *Poller) applySnapshot(ctx context.Context, machine store.Machine, at ti
 		delta.Attackers = append(delta.Attackers, attacker)
 	}
 
-	if err := p.store.ApplyScrape(ctx, delta); err != nil {
-		return err
-	}
-	return p.store.SaveCounterStates(ctx, machine.ID, current, at)
+	// The baseline goes in with the deltas it was measured against, in one
+	// transaction: applying one without the other would double-count this
+	// scrape on the next run.
+	delta.CounterStates = current
+	return p.store.ApplyScrape(ctx, delta)
 }
 
 // applyGeography fills in the place from the two sources a scrape can reach.
