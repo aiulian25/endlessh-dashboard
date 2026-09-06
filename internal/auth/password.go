@@ -83,6 +83,17 @@ func VerifyPassword(encodedHash, password string) (bool, error) {
 		return false, ErrInvalidHash
 	}
 
+	// argon2.IDKey panics rather than returning an error on parameters it cannot
+	// work with, and all of these are reachable from the stored string: a
+	// zero-length key, no rounds, no threads. HashPassword never writes any of
+	// them, so a hash carrying one is not ours whatever else it looks like, and
+	// refusing it here is the difference between a rejected sign-in and a
+	// panicking one. An empty salt does not panic but is refused with them: an
+	// unsalted hash is not something this app has ever produced.
+	if len(salt) == 0 || len(storedKey) == 0 || iterations == 0 || parallelism == 0 {
+		return false, ErrInvalidHash
+	}
+
 	candidate := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(storedKey)))
 	return subtle.ConstantTimeCompare(candidate, storedKey) == 1, nil
 }

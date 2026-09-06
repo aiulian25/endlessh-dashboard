@@ -124,10 +124,28 @@ func TestVerifyPasswordRejectsUnreadableHash(t *testing.T) {
 		{"unreadable parameters", rebuild(3, "m=lots,t=some,p=few")},
 		{"salt is not base64", rebuild(4, "!!!not-base64!!!")},
 		{"key is not base64", rebuild(5, "!!!not-base64!!!")},
+		// Fields that decode cleanly and are still not a hash anyone could have
+		// made here. argon2.IDKey panics on the last three rather than returning
+		// an error, so reaching it with any of them turns a sign-in into a crash.
+		{"no key at all", rebuild(5, "")},
+		{"no salt at all", rebuild(4, "")},
+		{"neither salt nor key", strings.Join([]string{fields[0], fields[1], fields[2], fields[3], "", ""}, "$")},
+		{"no rounds", rebuild(3, "m=65536,t=0,p=4")},
+		{"no threads", rebuild(3, "m=65536,t=3,p=0")},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
+			// A stored hash reaches this from the users table, so the only
+			// acceptable answer is a refusal. Crashing the sign-in is not one,
+			// and without this it would arrive as a stack trace rather than as
+			// a test saying what happened.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("verifying against this hash panicked: %v", recovered)
+				}
+			}()
+
 			accepted, err := VerifyPassword(testCase.hash, testPassword)
 			if !errors.Is(err, ErrInvalidHash) {
 				t.Fatalf("error is %v, want ErrInvalidHash", err)
@@ -606,5 +624,26 @@ func TestUsernamePolicyRejectsEmptyAndBlank(t *testing.T) {
 	}
 	if err := CheckUsernamePolicy("admin"); err != nil {
 		t.Errorf("CheckUsernamePolicy(\"admin\") = %v, want nil", err)
+	}
+}
+
+// A hash with no key in it must not become a skeleton key. Only a direct edit of
+// the users table can produce one — a truncating export, a hand-run UPDATE — but
+// the cost of being wrong about it is every password working, so it is worth
+// asking with more than one password.
+func TestEmptyStoredKeyAcceptsNoPassword(t *testing.T) {
+	valid := mustHash(t, testPassword)
+	fields := strings.Split(valid, "$")
+	fields[5] = ""
+	keyless := strings.Join(fields, "$")
+
+	for _, password := range []string{"", testPassword, "any-old-password", strings.Repeat("x", 64)} {
+		accepted, err := VerifyPassword(keyless, password)
+		if accepted {
+			t.Errorf("a hash with no key accepted %q", password)
+		}
+		if !errors.Is(err, ErrInvalidHash) {
+			t.Errorf("error for %q is %v, want ErrInvalidHash", password, err)
+		}
 	}
 }
