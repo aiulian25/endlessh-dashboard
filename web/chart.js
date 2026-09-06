@@ -12,10 +12,9 @@ const NICE_STEPS = [1, 2, 2.5, 5, 10];
 const SHORT_SPAN_MS = 36 * 3600 * 1000;
 const NOW_TOLERANCE_MS = 5 * 60 * 1000;
 
-// A machine keeps the same colour whichever machines are being shown, so the
-// swatch matches the sparkline on its sidebar card. The wrap is at PALETTE_SIZE
-// rather than a count of its own: at 3 it repeated after the third machine, so
-// the fourth and the first were drawn identically in a stack of six.
+// A machine keeps the same colour whichever machines are shown; machineColour
+// owns that. index is only the fallback for a machine whose colour is not known
+// here yet.
 function seriesClass(entry, index) {
   return machineColour(entry.machine_id, index);
 }
@@ -23,7 +22,7 @@ function seriesClass(entry, index) {
 export function renderLegend(host, series) {
   host.innerHTML = series.map((entry, index) => `
     <span class="legend-item">
-      <span class="legend-swatch ${seriesClass(entry, index)}"></span>
+      <span class="legend-swatch ${esc(seriesClass(entry, index))}"></span>
       <span>${esc(entry.machine_name)}</span>
     </span>`).join('');
 }
@@ -99,7 +98,7 @@ export function renderChart(host, data, options = {}) {
   const areas = [];
   for (let s = series.length - 1; s >= 0; s -= 1) {
     const step = Math.min(s, OPACITY_STEPS - 1);
-    areas.push(`<path class="area ${seriesClass(series[s], s)} o-${step}" d="${areaPath(cumulative[s], max)}"></path>`);
+    areas.push(`<path class="area ${esc(seriesClass(series[s], s))} o-${step}" d="${areaPath(cumulative[s], max)}"></path>`);
   }
 
   const grid = GRID_LINES.map((fraction) => {
@@ -160,7 +159,7 @@ export function renderChart(host, data, options = {}) {
     activeIndex = index;
     const rows = series.map((entry, s) => `
       <div class="chart-tip-row">
-        <span class="legend-swatch ${seriesClass(entry, s)}"></span>
+        <span class="legend-swatch ${esc(seriesClass(entry, s))}"></span>
         <span class="chart-tip-name">${esc(entry.machine_name)}</span>
         <span class="chart-tip-val">${esc(format(values[s][index]))}</span>
       </div>`).join('');

@@ -3,7 +3,7 @@
 import {
   api, qs, esc, icon, toast, onRefresh, renderError, emptyState, openModal, confirmModal,
   fmtDuration, fmtNumber, fmtRelative, fmtDateTime,
-  loadMachines, statusBadge, statusDot, navigate,
+  loadMachines, currentMachines, statusBadge, statusDot, navigate,
   getWindow, setWindow, WINDOWS, STATUS_DOWN,
   MACHINE_PALETTE_SIZE,
 } from './app.js';
@@ -113,7 +113,10 @@ function clearErrors(form) {
     node.hidden = true;
     node.textContent = '';
   });
-  form.querySelectorAll('.input').forEach((input) => input.removeAttribute('aria-invalid'));
+  // Wherever it was set, not only on .input: the colour field marks its
+  // radiogroup instead, and a flag left behind would tell a screen reader the
+  // field is still wrong after it has been fixed.
+  form.querySelectorAll('[aria-invalid]').forEach((node) => node.removeAttribute('aria-invalid'));
   const box = form.querySelector('[data-form-error]');
   box.hidden = true;
   box.textContent = '';
@@ -125,14 +128,35 @@ function showApiError(form, message) {
   if (target) {
     target.textContent = message;
     target.hidden = false;
-    const input = target.closest('.field').querySelector('.input');
-    input.setAttribute('aria-invalid', 'true');
-    input.focus();
+    markInvalid(target.closest('.field'));
     return;
   }
   const box = form.querySelector('[data-form-error]');
   box.textContent = message;
   box.hidden = false;
+}
+
+// markInvalid flags the control a message belongs to and puts the cursor on it.
+// Most fields hold a single .input. The colour field holds a radiogroup, where
+// the invalid state belongs to the group rather than to any one swatch, and the
+// cursor belongs on the colour that is currently chosen — reaching for .input
+// there found nothing and threw, so a rejected colour closed nothing and said
+// nothing.
+function markInvalid(field) {
+  if (!field) return;
+
+  const input = field.querySelector('.input');
+  if (input) {
+    input.setAttribute('aria-invalid', 'true');
+    input.focus();
+    return;
+  }
+
+  const group = field.querySelector('[role="radiogroup"]');
+  if (group) group.setAttribute('aria-invalid', 'true');
+  const chosen = field.querySelector('input[type="radio"]:checked')
+    || field.querySelector('input[type="radio"]');
+  if (chosen) chosen.focus();
 }
 
 // testConnection asks the server to scrape the target once, using the same code
@@ -225,14 +249,27 @@ async function renderList(mount) {
 
   const card = mount.querySelector('#machines-card');
 
+  // load paints from the list the app already holds. The refresh tick loads it
+  // once before calling here, and the first mount happens after startApp has
+  // loaded it, so fetching again would only repeat an answered request.
   const load = async () => {
     try {
-      const machines = await loadMachines();
-      paint(machines);
+      paint(currentMachines());
     } catch (error) {
       if (error.status === 401) return;
       renderError(card, error, load);
     }
+  };
+
+  // reload is for the paths that have just changed the list themselves: adding,
+  // editing and deleting cannot wait for the next tick to show their own work.
+  const reload = async () => {
+    try {
+      await loadMachines();
+    } catch (error) {
+      if (error.status !== 401) toast(error.message, 'error');
+    }
+    await load();
   };
 
   const paint = (machines) => {
@@ -242,7 +279,7 @@ async function renderList(mount) {
         text: 'Add the first endlessh-go machine you want to watch. You need its host, the port its Prometheus metrics listen on, and the metrics path.',
         actionLabel: 'Add your first machine',
       });
-      card.querySelector('[data-empty-action]').addEventListener('click', () => machineDialog(null, load));
+      card.querySelector('[data-empty-action]').addEventListener('click', () => machineDialog(null, reload));
       return;
     }
 
@@ -266,7 +303,7 @@ async function renderList(mount) {
     card.querySelectorAll('[data-edit]').forEach((button) => {
       button.addEventListener('click', () => {
         const machine = machines.find((entry) => entry.id === Number(button.dataset.edit));
-        machineDialog(machine, load);
+        machineDialog(machine, reload);
       });
     });
 
@@ -282,7 +319,7 @@ async function renderList(mount) {
         try {
           await api(`/machines/${machine.id}`, { method: 'DELETE' });
           toast(`${machine.name} deleted.`, 'success');
-          load();
+          reload();
         } catch (error) {
           if (error.status !== 401) toast(error.message, 'error');
         }
@@ -290,7 +327,7 @@ async function renderList(mount) {
     });
   };
 
-  mount.querySelector('#add-machine').addEventListener('click', () => machineDialog(null, load));
+  mount.querySelector('#add-machine').addEventListener('click', () => machineDialog(null, reload));
   onRefresh(load);
   await load();
 }
@@ -306,8 +343,7 @@ async function renderDetail(mount, id) {
 
   const load = async () => {
     try {
-      const machines = await loadMachines();
-      const machine = machines.find((entry) => entry.id === id);
+      const machine = currentMachines().find((entry) => entry.id === id);
       if (!machine) {
         mount.innerHTML = `<div class="card">${emptyState({
           title: 'Machine not found',

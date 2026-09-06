@@ -4,7 +4,7 @@ import {
   api, qs, esc, onRefresh, renderError, emptyState, navigate,
   fmtDuration, fmtBytes, fmtNumber, fmtDelta, fmtRelative,
   machinesParam, getWindow, setWindow, windowLabel, WINDOWS,
-  loadMachines,
+  currentMachines,
 } from './app.js';
 import { renderChart, renderLegend } from './chart.js';
 import { renderDonut } from './donut.js';
@@ -171,7 +171,7 @@ export async function render(mount) {
 
   const load = async () => {
     try {
-      const machines = await loadMachines();
+      const machines = currentMachines();
       if (!machines.length) {
         showEmpty();
         return;

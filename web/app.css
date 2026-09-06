@@ -452,6 +452,15 @@ button, input, select, textarea { font: inherit; color: inherit; }
   padding: 3px;
   border: 2px solid transparent;
 }
+/* An invalid swatch group has to look invalid, the way every other field does:
+   .input turns its border red, and without this the colour field would be the
+   one that shows a message with nothing marked. */
+.swatches[aria-invalid="true"] {
+  outline: 1px solid var(--danger);
+  outline-offset: 4px;
+  border-radius: var(--r-control);
+}
+
 .swatch:hover { border-color: var(--border); }
 .swatch:has(input:checked) { border-color: var(--ink); }
 .swatch:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 1px; }

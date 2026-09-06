@@ -489,6 +489,17 @@ function applySelection(ids) {
   document.dispatchEvent(new CustomEvent('machines-changed'));
 }
 
+// currentMachines is the list as it was last loaded. Views read this instead of
+// fetching a copy each: the refresh tick loads it once for all of them before
+// calling any, and the first mount happens after startApp has loaded it, so a
+// view asking again would only repeat a request that has just been answered.
+//
+// Anything that has just changed the list itself must not wait for the next
+// tick — those paths call loadMachines directly.
+export function currentMachines() {
+  return machines;
+}
+
 export async function loadMachines() {
   machines = await api('/machines');
   if (selected !== null) {
@@ -543,7 +554,7 @@ function sparkline(machine, index) {
   // repaint it. It carried its own three-colour cycle over the display index
   // before, so the first and fourth cards in the sidebar were the same blue.
   const colour = machineColour(machine.id, index);
-  return `<svg class="spark ${colour}" viewBox="0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${bars}</svg>`;
+  return `<svg class="spark ${esc(colour)}" viewBox="0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${bars}</svg>`;
 }
 
 function unreachableFor(machine) {
@@ -642,11 +653,19 @@ function announce(message) {
   if (live) live.textContent = message;
 }
 
+// draggedId is the machine being dragged, or null. It sits at module scope
+// because the refresh tick has to be able to see it: a redraw during a drag
+// replaces the very element under the pointer, and the browser cancels the drag.
+let draggedId = null;
+
 // wireReordering gives the sidebar both ways to reorder: dragging for a pointer,
 // and the arrow keys for anyone who cannot drag — a mouse-only affordance would
 // put the feature out of reach of keyboard and screen-reader users entirely.
 function wireReordering(list) {
-  let draggedId = null;
+  // Every render rewires from scratch, and a drag that was in flight died with
+  // the elements it began on. Clearing here is what stops a drag whose grip no
+  // longer exists from leaving the flag set and freezing refresh for good.
+  draggedId = null;
 
   const clearDropStyling = () => {
     list.querySelectorAll('.mcard').forEach((card) => card.classList.remove('drop-target', 'dragging'));
@@ -738,7 +757,7 @@ export function onRefresh(callback) {
   return () => refreshers.delete(callback);
 }
 
-function runRefresh() {
+async function runRefresh() {
   if (document.hidden) return;
   // No session means the login screen is showing; refreshing would only bounce
   // an unauthenticated request and reset whatever the user is typing.
@@ -746,7 +765,9 @@ function runRefresh() {
   // Refresh redraws whole subtrees, which would drop focus and any half-typed
   // value, so a user who is actively using a control keeps what they have.
   if (isUserBusy()) return;
-  loadMachines().catch(() => {});
+  // Awaited, so the views that follow read a list that is already current and
+  // ask for it none more times between them.
+  await loadMachines().catch(() => {});
   refreshers.forEach((callback) => {
     try {
       callback();
@@ -810,9 +831,17 @@ function parseHash() {
 // isUserBusy reports whether the person is mid-interaction with a control, in
 // which case a background redraw would take the focus or the text away.
 function isUserBusy() {
+  // A drag in flight comes first, because the browser parks focus on the body
+  // for the duration of one — so every test below would say nobody is busy at
+  // the exact moment a redraw would cancel what they are doing.
+  if (draggedId !== null) return true;
+
   const active = document.activeElement;
   if (!active || active === document.body) return false;
   if (document.querySelector('dialog[open]')) return true;
+  // A held grip is mid-reorder before any key is pressed. It is a <button>, so
+  // it is natively focusable and matches none of the tests below.
+  if (active.classList.contains('mcard-grip')) return true;
   // A focused chart or map bubble is a reading position as much as a half-typed
   // field is: redrawing under it would drop the keyboard user back to the body.
   return ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName)
