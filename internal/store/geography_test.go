@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -716,5 +717,123 @@ func TestTrappedNowPerMachineAndHeadlineCountDifferentThings(t *testing.T) {
 	if summed := perMachine[alpha.ID] + perMachine[beta.ID]; int64(summed) <= both.TrappedNow {
 		t.Errorf("cards sum to %d and the headline says %d; the shared address should make the cards sum higher",
 			summed, both.TrappedNow)
+	}
+}
+
+// backfillIndexName is the index the geography backfill depends on. Named here
+// so a rename has to be deliberate rather than quietly dropping the query back
+// to a full table scan.
+const backfillIndexName = "idx_attackers_missing_location"
+
+func TestBackfillQueryUsesItsIndex(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	machine := createMachine(t, store, "alpha")
+
+	// Enough rows, mostly placed, for the planner to have a reason to prefer an
+	// index. On an empty table it may reasonably choose to scan either way.
+	for i := 0; i < 500; i++ {
+		country, location := "DE", "Berlin"
+		if i%20 == 0 {
+			country, location = "", ""
+		}
+		applyScrape(t, store, ScrapeDelta{
+			MachineID: machine.ID,
+			At:        baseTime,
+			Attackers: []AttackerDelta{{
+				IPAddress:   fmt.Sprintf("198.51.%d.%d", i/256, i%256),
+				Country:     country,
+				CountryCode: country,
+				Location:    location,
+				Connections: 1,
+			}},
+		})
+	}
+	if _, err := store.database.ExecContext(ctx, "ANALYZE"); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+
+	// The plan is asked for the real query, spelled the way the store spells it.
+	// A partial index is only used while the query's condition still matches the
+	// index's, so this is really a test that the two have not drifted apart.
+	rows, err := store.database.QueryContext(ctx,
+		`EXPLAIN QUERY PLAN
+		 SELECT MIN(machine_id), ip_address
+		 FROM attackers
+		 WHERE location = '' OR country_code = ''
+		 GROUP BY ip_address
+		 ORDER BY MAX(last_seen) DESC
+		 LIMIT ?`, 100)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan the plan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the plan: %v", err)
+	}
+
+	joined := strings.Join(plan, " | ")
+	if !strings.Contains(joined, backfillIndexName) {
+		t.Errorf("the backfill query does not use %s; plan: %s", backfillIndexName, joined)
+	}
+	// Leading on the grouped column is what saves the temporary B-tree; if that
+	// goes, the index is still used but has lost half of what it is for.
+	if strings.Contains(joined, "TEMP B-TREE FOR GROUP BY") {
+		t.Errorf("the backfill query still builds a temporary B-tree to group; plan: %s", joined)
+	}
+}
+
+func TestBackfillIndexAppliesToAnExistingDatabase(t *testing.T) {
+	store, path := newStore(t)
+	ctx := context.Background()
+
+	// A database that already carries data from before this migration: the
+	// upgrade path, which is the one that matters for anybody already running.
+	machine := createMachine(t, store, "alpha")
+	applyScrape(t, store, ScrapeDelta{
+		MachineID: machine.ID,
+		At:        baseTime,
+		Attackers: []AttackerDelta{{IPAddress: "198.51.100.7", Connections: 1}},
+	})
+	if _, err := store.database.ExecContext(ctx, "DROP INDEX "+backfillIndexName); err != nil {
+		t.Fatalf("drop the index to simulate the older schema: %v", err)
+	}
+	if _, err := store.database.ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = 6"); err != nil {
+		t.Fatalf("rewind the migration record: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate an existing database: %v", err)
+	}
+
+	assertInt(t, "index present after the upgrade", scanInt(t, reopened,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", backfillIndexName), 1)
+
+	// The data it was carrying is still there and still findable.
+	missing, err := reopened.AttackersMissingLocation(ctx, 10)
+	if err != nil {
+		t.Fatalf("AttackersMissingLocation after the upgrade: %v", err)
+	}
+	if len(missing) != 1 || missing[0].IPAddress != "198.51.100.7" {
+		t.Errorf("unplaced attackers after the upgrade = %+v, want the one that was there", missing)
 	}
 }
