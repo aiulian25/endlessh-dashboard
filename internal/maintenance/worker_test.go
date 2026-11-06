@@ -177,3 +177,14 @@ func TestRunResumesTheScheduleBeforeItsFirstPass(t *testing.T) {
 		t.Fatal("Run did not return after its context was cancelled")
 	}
 }
+
+func TestCancelledMaintenanceStartsNoStages(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Nil dependencies expose any attempted work after cancellation.
+	w := &Worker{dailyBackup: true}
+	w.Run(ctx)
+	w.runOnce(ctx)
+	w.prune(ctx, time.Now())
+	w.backup(ctx, time.Now())
+}

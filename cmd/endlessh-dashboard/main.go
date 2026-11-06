@@ -4,10 +4,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -113,13 +113,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer dataStore.Close()
+	closeSharedResources := true
+	defer func() {
+		if closeSharedResources {
+			dataStore.Close()
+		}
+	}()
 
 	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if err := dataStore.Migrate(rootContext); err != nil {
 		return err
+	}
+
+	if count, err := dataStore.IPIdentityReviewCount(rootContext); err != nil {
+		return err
+	} else if count > 0 {
+		logger.Warn("legacy IP identity records retained for review; inspect attacker_ip_archive and counter_ip_archive on a database copy", "records", count)
 	}
 
 	authService := auth.NewService(dataStore, configuration.SessionLifetime)
@@ -136,20 +147,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer geoResolver.Close()
+	defer func() {
+		if closeSharedResources {
+			geoResolver.Close()
+		}
+	}()
 	if geoResolver.Enabled() {
 		logger.Info("local GeoIP enrichment enabled", "database", geoResolver.Path())
 	}
 
 	onlineResolver := geo.NewOnlineResolver(
 		configuration.GeoIPOnline, configuration.GeoIPOnlineEndpoint, configuration.GeoIPOnlineRate)
-	defer onlineResolver.Close()
-	if onlineResolver.Enabled() {
-		// Loud on purpose: this is the only thing the app sends anywhere, and the
-		// operator should see in the log that they really did turn it on.
-		logger.Warn("online GeoIP lookups enabled: attacker addresses will be sent to a third party",
-			"endpoint", onlineResolver.Endpoint(), "requests_per_minute", configuration.GeoIPOnlineRate)
-	}
+	defer func() {
+		if closeSharedResources {
+			onlineResolver.Close()
+		}
+	}()
+	logOnlineProvider(logger, onlineResolver, configuration.GeoIPOnlineRate)
 
 	validator := registry.NewValidator(configuration.ScrapeAllowlistCIDRs, configuration.ScrapeBlockPrivate)
 	registryService := registry.NewService(dataStore, validator)
@@ -161,7 +175,7 @@ func run() error {
 	}
 
 	poller := scrape.NewPoller(dataStore, validator, geoResolver, logger,
-		configuration.ScrapeInterval, configuration.ScrapeTimeout)
+		configuration.ScrapeInterval, configuration.ScrapeTimeout, configuration.ScrapeConcurrency)
 
 	worker := maintenance.NewWorker(dataStore, authService, backupManager, logger,
 		configuration.RetentionDays, configuration.BackupDaily)
@@ -181,34 +195,31 @@ func run() error {
 		IdleTimeout:       idleTimeout,
 	}
 
-	workerContext, stopWorkers := context.WithCancel(rootContext)
-	defer stopWorkers()
-	go poller.Run(workerContext)
-	go worker.Run(workerContext)
-	go enricher.Run(workerContext)
-
-	serverErrors := make(chan error, 1)
-	go func() {
-		logger.Info("dashboard listening", "address", configuration.ListenAddress, "version", version)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- err
-		}
-	}()
-
-	select {
-	case err := <-serverErrors:
+	// Bind before confirming the restore so a startup/listen failure leaves the
+	// rollback generation available. No workers or requests run before confirmation.
+	listener, err := net.Listen("tcp", configuration.ListenAddress)
+	if err != nil {
 		return err
-	case <-restart:
-		logger.Info("restarting to apply a restore")
-	case <-rootContext.Done():
-		logger.Info("shutting down")
+	}
+	defer listener.Close()
+	if err := store.ConfirmPendingRestore(configuration.DatabasePath()); err != nil {
+		return err
 	}
 
-	stopWorkers()
-	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
-	defer cancel()
-	if err := httpServer.Shutdown(shutdownContext); err != nil {
-		logger.Warn("graceful shutdown timed out", "error", err)
+	logger.Info("dashboard listening", "address", configuration.ListenAddress, "version", version)
+	safeToClose, err := serveWithWorkers(rootContext, restart, httpServer, listener, []backgroundWorker{
+		{name: "scraper", run: poller.Run},
+		{name: "maintenance", run: worker.Run},
+		{name: "geography", run: enricher.Run},
+	}, logger, shutdownGracePeriod)
+	closeSharedResources = safeToClose
+	return err
+}
+
+// Log the opted-in destination without exposing authenticated URL templates.
+func logOnlineProvider(logger *slog.Logger, resolver *geo.OnlineResolver, rate int) {
+	if resolver.Enabled() {
+		logger.Warn("online GeoIP lookups enabled: attacker addresses will be sent to the configured provider",
+			"endpoint", resolver.Endpoint(), "requests_per_minute", rate)
 	}
-	return nil
 }

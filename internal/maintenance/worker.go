@@ -48,6 +48,9 @@ func NewWorker(
 }
 
 func (w *Worker) Run(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	w.seedLastBackup()
 
 	ticker := time.NewTicker(tickInterval)
@@ -100,15 +103,24 @@ func (w *Worker) seedLastBackup() {
 }
 
 func (w *Worker) runOnce(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	if removed, err := w.auth.PurgeExpiredSessions(ctx); err != nil {
 		w.logger.Error("purge expired sessions", "error", err)
 	} else if removed > 0 {
 		w.logger.Debug("purged expired sessions", "count", removed)
 	}
 
+	if ctx.Err() != nil {
+		return
+	}
 	now := time.Now().UTC()
 	if now.Sub(w.lastPrune) >= dailyPeriod {
 		w.prune(ctx, now)
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	if w.dailyBackup && now.Sub(w.lastBackup) >= dailyPeriod {
 		w.backup(ctx, now)
@@ -116,6 +128,9 @@ func (w *Worker) runOnce(ctx context.Context) {
 }
 
 func (w *Worker) prune(ctx context.Context, now time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
 	cutoff := now.Add(-time.Duration(w.retentionDays) * hoursPerDay * time.Hour)
 	stats, err := w.store.Prune(ctx, cutoff)
 	if err != nil {
@@ -126,6 +141,7 @@ func (w *Worker) prune(ctx context.Context, now time.Time) {
 	w.logger.Info("pruned history older than the retention window",
 		"retention_days", w.retentionDays,
 		"rollups", stats.Rollups,
+		"coverage_minutes", stats.Coverage,
 		"attackers", stats.Attackers,
 		"counter_states", stats.CounterStates,
 		"pages_freed", stats.PagesFreed,
@@ -133,6 +149,9 @@ func (w *Worker) prune(ctx context.Context, now time.Time) {
 }
 
 func (w *Worker) backup(ctx context.Context, now time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
 	backup, err := w.backups.Create(ctx)
 	if err != nil {
 		w.logger.Error("daily backup", "error", err)
