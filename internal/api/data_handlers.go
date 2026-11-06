@@ -15,6 +15,9 @@ const (
 )
 
 type overviewResponse struct {
+	Activity               activityMetadata        `json:"activity"`
+	From                   time.Time               `json:"from"`
+	To                     time.Time               `json:"to"`
 	TimeWastedSeconds      float64                 `json:"time_wasted_seconds"`
 	TimeWastedDeltaSeconds float64                 `json:"time_wasted_delta_seconds"`
 	AttackersTrapped       int64                   `json:"attackers_trapped"`
@@ -39,10 +42,18 @@ type latestAttackerResponse struct {
 }
 
 type seriesPointResponse struct {
-	At             time.Time `json:"t"`
-	TrappedSeconds float64   `json:"trapped_seconds"`
-	Opens          int64     `json:"opens"`
-	BytesSent      int64     `json:"bytes_sent"`
+	Coverage        string     `json:"coverage"`
+	ObservedSeconds float64    `json:"observed_seconds"`
+	Attempts        int64      `json:"attempts"`
+	Successes       int64      `json:"successes"`
+	UncertainFrom   *time.Time `json:"uncertain_from"`
+	UncertainTo     *time.Time `json:"uncertain_to"`
+	At              time.Time  `json:"t"`
+	To              time.Time  `json:"to"`
+	Partial         bool       `json:"partial"`
+	TrappedSeconds  float64    `json:"trapped_seconds"`
+	Opens           int64      `json:"opens"`
+	BytesSent       int64      `json:"bytes_sent"`
 }
 
 type seriesResponse struct {
@@ -59,31 +70,41 @@ type timeSeriesResponse struct {
 }
 
 type attackerResponse struct {
-	IPAddress      string    `json:"ip"`
-	MachineID      int64     `json:"machine_id"`
-	MachineName    string    `json:"machine_name"`
-	Country        string    `json:"country"`
-	CountryCode    string    `json:"country_code"`
-	Geohash        string    `json:"geohash"`
-	Location       string    `json:"location"`
-	ISP            string    `json:"isp"`
-	FirstSeen      time.Time `json:"first_seen"`
-	LastSeen       time.Time `json:"last_seen"`
-	Connections    int64     `json:"connections"`
-	TrappedSeconds float64   `json:"trapped_seconds"`
-	Status         string    `json:"status"`
+	IPAddress              string     `json:"ip"`
+	MachineID              int64      `json:"machine_id"`
+	MachineName            string     `json:"machine_name"`
+	Country                string     `json:"country"`
+	CountryCode            string     `json:"country_code"`
+	Geohash                string     `json:"geohash"`
+	Location               string     `json:"location"`
+	ISP                    string     `json:"isp"`
+	FirstSeen              time.Time  `json:"first_seen"`
+	LastSeen               time.Time  `json:"last_seen"`
+	Connections            int64      `json:"connections"`
+	TrappedSeconds         float64    `json:"trapped_seconds"`
+	Status                 string     `json:"status"`
+	LastObservedAt         time.Time  `json:"last_observed_at"`
+	LastMeasuredActivityAt *time.Time `json:"last_measured_activity_at"`
+	HasUndatedHistory      bool       `json:"has_undated_history"`
+	FirstObservationKnown  bool       `json:"first_observation_known"`
 }
 
 type attackerPageResponse struct {
-	Total   int                `json:"total"`
-	Page    int                `json:"page"`
-	PerPage int                `json:"per_page"`
-	Rows    []attackerResponse `json:"rows"`
+	DistinctIPs int                `json:"distinct_ips"`
+	Activity    activityMetadata   `json:"activity"`
+	From        time.Time          `json:"from"`
+	To          time.Time          `json:"to"`
+	Total       int                `json:"total"`
+	Page        int                `json:"page"`
+	PerPage     int                `json:"per_page"`
+	Rows        []attackerResponse `json:"rows"`
 }
 
 type countryCountResponse struct {
-	Country string `json:"country"`
-	Count   int    `json:"count"`
+	CountryKey  string `json:"country_key"`
+	CountryCode string `json:"country_code"`
+	Country     string `json:"country"`
+	Count       int    `json:"count"`
 }
 
 func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Request) {
@@ -94,12 +115,15 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	windowDuration, _ := resolveWindow(request)
+	span, _, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
 	selected := machineIDs(machines)
 	overview, err := s.store.Overview(
 		request.Context(), selected,
-		now.Add(-windowDuration), now.Add(-s.config.StaleClientThreshold()),
+		span.From, now.Add(-s.config.StaleClientThreshold()), span.To,
 	)
 	if err != nil {
 		s.logger.Error("overview", "error", err)
@@ -116,7 +140,7 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	payload := overviewResponse{
+	payload := overviewResponse{Activity: s.activityMetadata(machines, now), From: span.From, To: span.To,
 		TimeWastedSeconds:      overview.TimeWastedSeconds,
 		TimeWastedDeltaSeconds: overview.TimeWastedDeltaSeconds,
 		AttackersTrapped:       overview.AttackersTrapped,
@@ -128,13 +152,13 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 		UniqueAttackers:        overview.UniqueAttackers,
 		Countries:              overview.Countries,
 	}
-	if found {
+	if found && latest.LastMeasuredActivityAt != nil {
 		payload.LatestAttacker = &latestAttackerResponse{
 			IPAddress:   latest.IPAddress,
 			Country:     latest.Country,
 			CountryCode: latest.CountryCode,
 			Location:    latest.Location,
-			At:          latest.LastSeen,
+			At:          *latest.LastMeasuredActivityAt,
 		}
 	}
 	writeJSON(writer, http.StatusOK, payload)
@@ -148,9 +172,11 @@ func (s *Server) handleTimeSeries(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	windowDuration, bucketSeconds := resolveWindow(request)
-	to := time.Now().UTC()
-	from := to.Add(-windowDuration)
+	span, bucketSeconds, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
+	from, to := span.From, span.To
 
 	series, err := s.store.TimeSeries(request.Context(), machines, from, to, bucketSeconds)
 	if err != nil {
@@ -169,7 +195,8 @@ func (s *Server) handleTimeSeries(writer http.ResponseWriter, request *http.Requ
 		points := make([]seriesPointResponse, 0, len(machineSeries.Points))
 		for _, point := range machineSeries.Points {
 			points = append(points, seriesPointResponse{
-				At:             point.At,
+				At: point.At, To: point.To, Partial: point.Partial,
+				Coverage: point.Coverage, ObservedSeconds: point.ObservedSeconds, Attempts: point.Attempts, Successes: point.Successes, UncertainFrom: point.UncertainFrom, UncertainTo: point.UncertainTo,
 				TrappedSeconds: point.TrappedSeconds,
 				Opens:          point.Opens,
 				BytesSent:      point.BytesSent,
@@ -193,23 +220,28 @@ func (s *Server) handleAttackers(writer http.ResponseWriter, request *http.Reque
 	}
 
 	query := request.URL.Query()
-	windowDuration, _ := resolveWindow(request)
+	span, _, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
 	now := time.Now().UTC()
 
 	page, perPage := paginationFrom(query)
 	sortColumn, descending := sortFrom(query)
 
 	filter := store.AttackerFilter{
-		MachineIDs:     machineIDs(machines),
-		Since:          now.Add(-windowDuration),
-		Country:        strings.TrimSpace(query.Get("country")),
-		Status:         strings.TrimSpace(query.Get("status")),
-		Search:         strings.TrimSpace(query.Get("q")),
-		SortColumn:     sortColumn,
-		SortDescending: descending,
-		Page:           page,
-		PerPage:        perPage,
-		ActiveSince:    now.Add(-s.config.StaleClientThreshold()),
+		MachineIDs: machineIDs(machines),
+		Since:      span.From, Until: span.To,
+		Country:         strings.TrimSpace(query.Get("country")),
+		CountryKey:      query.Get("country_key"),
+		Status:          strings.TrimSpace(query.Get("status")),
+		Search:          strings.TrimSpace(query.Get("q")),
+		SortColumn:      sortColumn,
+		SortDescending:  descending,
+		Page:            page,
+		PerPage:         perPage,
+		ActiveSince:     now.Add(-s.config.StaleClientThreshold()),
+		ObservationOnly: query.Get("basis") == "observed",
 	}
 
 	result, err := s.store.ListAttackers(request.Context(), filter)
@@ -219,7 +251,7 @@ func (s *Server) handleAttackers(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	payload := attackerPageResponse{
+	payload := attackerPageResponse{DistinctIPs: result.DistinctIPs, Activity: s.activityMetadata(machines, now), From: span.From, To: span.To,
 		Total:   result.Total,
 		Page:    page,
 		PerPage: perPage,
@@ -240,6 +272,7 @@ func (s *Server) handleAttackers(writer http.ResponseWriter, request *http.Reque
 			Connections:    row.Connections,
 			TrappedSeconds: row.TrappedSeconds,
 			Status:         row.Status,
+			LastObservedAt: row.LastObservedAt, LastMeasuredActivityAt: row.LastMeasuredActivityAt, HasUndatedHistory: row.HasUndatedHistory, FirstObservationKnown: row.FirstObservationKnown,
 		})
 	}
 	writeJSON(writer, http.StatusOK, payload)
@@ -257,9 +290,11 @@ func (s *Server) handleAttackerCountries(writer http.ResponseWriter, request *ht
 	// chip on this page and its slice in the donut can never report different
 	// numbers for the same window. The chips need only the count; the rest of
 	// the row is what the donut draws with.
-	windowDuration, _ := resolveWindow(request)
-	totals, err := s.store.CountryTotals(
-		request.Context(), machineIDs(machines), time.Now().UTC().Add(-windowDuration))
+	span, _, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
+	totals, err := s.store.CountryTotalsInRange(request.Context(), machineIDs(machines), span, request.URL.Query().Get("basis") == "observed")
 	if err != nil {
 		s.logger.Error("country counts", "error", err)
 		writeError(writer, http.StatusInternalServerError, "could not load the country summary")
@@ -268,7 +303,7 @@ func (s *Server) handleAttackerCountries(writer http.ResponseWriter, request *ht
 
 	payload := make([]countryCountResponse, 0, len(totals))
 	for _, total := range totals {
-		payload = append(payload, countryCountResponse{Country: total.Country, Count: total.Attackers})
+		payload = append(payload, countryCountResponse{Country: total.Country, CountryKey: total.CountryKey, CountryCode: total.CountryCode, Count: total.Attackers})
 	}
 	writeJSON(writer, http.StatusOK, payload)
 }

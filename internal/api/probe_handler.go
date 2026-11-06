@@ -19,18 +19,21 @@ type Prober interface {
 }
 
 type probeResponse struct {
-	Address        string   `json:"address"`
-	Clients        int      `json:"clients"`
-	LocalPorts     []string `json:"local_ports"`
-	Connections    int64    `json:"connections"`
-	TrappedSeconds float64  `json:"trapped_seconds"`
-	GeoIPEnabled   bool     `json:"geoip_enabled"`
-	Message        string   `json:"message"`
+	Reachable        bool                          `json:"reachable"`
+	ExpositionValid  bool                          `json:"exposition_valid"`
+	EndlesshEvidence string                        `json:"endlessh_evidence"`
+	MetricFamilies   []scrape.MetricFamilyEvidence `json:"metric_families"`
+	Address          string                        `json:"address"`
+	Clients          int                           `json:"clients"`
+	LocalPorts       []string                      `json:"local_ports"`
+	Connections      int64                         `json:"connections"`
+	TrappedSeconds   float64                       `json:"trapped_seconds"`
+	GeoIPEnabled     bool                          `json:"geoip_enabled"`
+	Message          string                        `json:"message"`
 }
 
-// handleTestMachine answers "would this target actually work?" before a machine
-// is saved, so a dead or mistyped host is caught at the point of typing rather
-// than becoming a red row on the Machines page.
+// handleTestMachine reports reachability and sample compatibility before saving;
+// an inconclusive endpoint is not treated as verified product identity.
 func (s *Server) handleTestMachine(writer http.ResponseWriter, request *http.Request) {
 	var payload machineRequest
 	if !decodeJSON(writer, request, &payload) {
@@ -58,44 +61,56 @@ func (s *Server) handleTestMachine(writer http.ResponseWriter, request *http.Req
 			writeFieldError(writer, http.StatusBadRequest, validationError.Field, validationError.Message)
 			return
 		}
-		writeFieldError(writer, http.StatusBadGateway, "host", probeFailureMessage(input, err))
+		writeJSON(writer, http.StatusBadGateway, struct {
+			errorResponse
+			Reachable        bool   `json:"reachable"`
+			ExpositionValid  bool   `json:"exposition_valid"`
+			EndlesshEvidence string `json:"endlessh_evidence"`
+		}{errorResponse: errorResponse{Error: probeFailureMessage(input, err), Field: "host"}, Reachable: summary.Reachable, EndlesshEvidence: "unavailable"})
 		return
 	}
 
+	// A nil probe error means the bounded body passed the shared parser.
+	summary.Reachable, summary.ExpositionValid = true, true
+	if summary.MetricFamilies == nil {
+		summary.MetricFamilies = []scrape.MetricFamilyEvidence{}
+	}
 	writeJSON(writer, http.StatusOK, probeResponse{
-		Address:        summary.Address,
-		Clients:        summary.Clients,
-		LocalPorts:     summary.LocalPorts,
-		Connections:    summary.Connections,
-		TrappedSeconds: summary.TrappedSeconds,
-		GeoIPEnabled:   summary.GeoIPEnabled,
-		Message:        probeSuccessMessage(summary),
+		Reachable:        summary.Reachable,
+		ExpositionValid:  summary.ExpositionValid,
+		EndlesshEvidence: summary.EvidenceState(),
+		MetricFamilies:   summary.MetricFamilies,
+		Address:          summary.Address,
+		Clients:          summary.Clients,
+		LocalPorts:       summary.LocalPorts,
+		Connections:      summary.Connections,
+		TrappedSeconds:   summary.TrappedSeconds,
+		GeoIPEnabled:     summary.GeoIPEnabled,
+		Message:          probeSuccessMessage(summary),
 	})
 }
 
 func probeSuccessMessage(summary scrape.ProbeSummary) string {
 	var message strings.Builder
-	message.WriteString("Reached endlessh-go")
+	message.WriteString("Reachable metrics endpoint")
 	if summary.Address != "" {
 		message.WriteString(" at " + summary.Address)
 	}
-	if len(summary.LocalPorts) > 0 {
-		message.WriteString(", trapping on port " + strings.Join(summary.LocalPorts, ", "))
-	}
 	message.WriteString(". ")
-
-	switch {
-	case summary.Clients == 1:
-		message.WriteString("1 attacker is currently in its metrics")
-	case summary.Clients > 1:
-		message.WriteString(fmt.Sprintf("%d attackers are currently in its metrics", summary.Clients))
-	default:
-		message.WriteString("No attackers recorded there yet, which is normal for a fresh tarpit")
+	if len(summary.MetricFamilies) == 0 {
+		message.WriteString("No Endlessh samples yet; result is inconclusive. A fresh exporter and an unrelated metrics service can look the same. Check the target; saving is still allowed.")
+		return message.String()
 	}
-	if summary.Clients > 0 && !summary.GeoIPEnabled {
-		message.WriteString(", with GeoIP off so country and location will be blank")
+	message.WriteString(fmt.Sprintf("Supported Endlessh metric samples found (%d of 6 families; %s evidence). ", len(summary.MetricFamilies), summary.EvidenceState()))
+	if len(summary.LocalPorts) > 0 {
+		message.WriteString("Reported local ports: " + strings.Join(summary.LocalPorts, ", ") + ". ")
 	}
-	message.WriteString(".")
+	message.WriteString(fmt.Sprintf("%d distinct IPs in the current metrics; cumulative samples do not establish active sessions. ", summary.Clients))
+	if summary.GeoIPEnabled {
+		message.WriteString("Country labels observed.")
+	} else {
+		message.WriteString("No usable country labels observed.")
+	}
 	return message.String()
 }
 
@@ -114,8 +129,10 @@ func probeFailureMessage(input registry.MachineInput, err error) string {
 		return fmt.Sprintf("The name %q does not resolve.", input.Host)
 	case strings.Contains(reason, "returned "):
 		return fmt.Sprintf("%s answered, but not with metrics: %s. Check the metrics path.", target, reason)
+	case strings.Contains(reason, "metric "), strings.Contains(reason, "metrics response"), strings.Contains(reason, "read metrics"):
+		return fmt.Sprintf("%s answered, but its metrics were not accepted: %s.", target, reason)
 	case strings.Contains(reason, "parse metrics"):
 		return fmt.Sprintf("%s answered, but the response is not Prometheus metrics. Is this really an endlessh-go metrics endpoint?", target)
 	}
-	return fmt.Sprintf("Could not reach %s: %s", target, reason)
+	return fmt.Sprintf("Connection test for %s failed: %s", target, reason)
 }

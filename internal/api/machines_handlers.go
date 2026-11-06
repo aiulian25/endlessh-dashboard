@@ -14,6 +14,8 @@ const (
 	statusDegraded = "degraded"
 	statusDown     = "down"
 	statusDisabled = "disabled"
+	statusStale    = "stale"
+	statusNever    = "never_scraped"
 
 	// degradedAfterFailures is the point where a machine stops being a blip and
 	// starts being a problem worth showing in red.
@@ -26,21 +28,24 @@ const (
 )
 
 type machineResponse struct {
-	ID                  int64      `json:"id"`
-	Name                string     `json:"name"`
-	Host                string     `json:"host"`
-	Port                int        `json:"port"`
-	MetricsPath         string     `json:"metrics_path"`
-	GroupLabel          string     `json:"group_label"`
-	Enabled             bool       `json:"enabled"`
-	Status              string     `json:"status"`
-	LastScrapeAt        *time.Time `json:"last_scrape_at"`
-	LastOKAt            *time.Time `json:"last_ok_at"`
-	ConsecutiveFailures int        `json:"consecutive_failures"`
-	LastError           string     `json:"last_error"`
-	TrappedNow          int        `json:"trapped_now"`
-	Activity            []float64  `json:"activity"`
-	Colour              string     `json:"colour"`
+	ActivityCoverage         []string   `json:"activity_coverage"`
+	ActivityThresholdSeconds float64    `json:"activity_threshold_seconds"`
+	ID                       int64      `json:"id"`
+	Name                     string     `json:"name"`
+	Host                     string     `json:"host"`
+	Port                     int        `json:"port"`
+	MetricsPath              string     `json:"metrics_path"`
+	GroupLabel               string     `json:"group_label"`
+	Enabled                  bool       `json:"enabled"`
+	Status                   string     `json:"status"`
+	LastScrapeAt             *time.Time `json:"last_scrape_at"`
+	LastOKAt                 *time.Time `json:"last_ok_at"`
+	ConsecutiveFailures      int        `json:"consecutive_failures"`
+	LastError                string     `json:"last_error"`
+	TrappedNow               int        `json:"trapped_now"`
+	Activity                 []float64  `json:"activity"`
+	Colour                   string     `json:"colour"`
+	TargetChangedAt          *time.Time `json:"target_changed_at,omitempty"`
 }
 
 type machineRequest struct {
@@ -122,9 +127,18 @@ func (s *Server) handleListMachines(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	coverage, err := s.store.RecentCoverageByMachine(request.Context(), now, activityBucketSeconds, activityBuckets)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "could not load machine coverage")
+		return
+	}
 	responses := make([]machineResponse, 0, len(machines))
 	for _, machine := range machines {
-		responses = append(responses, toMachineResponse(machine, trappedNow[machine.ID], activity[machine.ID]))
+		response := toMachineResponse(machine, trappedNow[machine.ID], activity[machine.ID], s.config.StaleClientThreshold().Seconds())
+		if value := coverage[machine.ID]; value != nil {
+			response.ActivityCoverage = value
+		}
+		responses = append(responses, response)
 	}
 	writeJSON(writer, http.StatusOK, responses)
 }
@@ -139,7 +153,7 @@ func (s *Server) handleCreateMachine(writer http.ResponseWriter, request *http.R
 	if s.writeRegistryError(writer, err, "could not add the machine") {
 		return
 	}
-	writeJSON(writer, http.StatusCreated, toMachineResponse(machine, 0, nil))
+	writeJSON(writer, http.StatusCreated, toMachineResponse(machine, 0, nil, s.config.StaleClientThreshold().Seconds()))
 }
 
 func (s *Server) handleUpdateMachine(writer http.ResponseWriter, request *http.Request) {
@@ -158,7 +172,7 @@ func (s *Server) handleUpdateMachine(writer http.ResponseWriter, request *http.R
 	if s.writeRegistryError(writer, err, "could not update the machine") {
 		return
 	}
-	writeJSON(writer, http.StatusOK, toMachineResponse(machine, 0, nil))
+	writeJSON(writer, http.StatusOK, toMachineResponse(machine, 0, nil, s.config.StaleClientThreshold().Seconds()))
 }
 
 func (s *Server) handleDeleteMachine(writer http.ResponseWriter, request *http.Request) {
@@ -197,8 +211,8 @@ func (s *Server) writeRegistryError(writer http.ResponseWriter, err error, fallb
 	return true
 }
 
-func toMachineResponse(machine store.Machine, trappedNow int, activity []float64) machineResponse {
-	return machineResponse{
+func toMachineResponse(machine store.Machine, trappedNow int, activity []float64, thresholdSeconds float64) machineResponse {
+	return machineResponse{ActivityThresholdSeconds: thresholdSeconds,
 		ID:                  machine.ID,
 		Name:                machine.Name,
 		Host:                machine.Host,
@@ -206,14 +220,16 @@ func toMachineResponse(machine store.Machine, trappedNow int, activity []float64
 		MetricsPath:         machine.MetricsPath,
 		GroupLabel:          machine.GroupLabel,
 		Enabled:             machine.Enabled,
-		Status:              machineStatus(machine),
+		Status:              machineStatusAt(machine, time.Now().UTC(), time.Duration(thresholdSeconds*float64(time.Second))),
 		LastScrapeAt:        machine.LastScrapeAt,
 		LastOKAt:            machine.LastOKAt,
 		ConsecutiveFailures: machine.ConsecutiveFailures,
 		LastError:           machine.LastError,
 		TrappedNow:          trappedNow,
 		Activity:            denseActivity(activity),
+		ActivityCoverage:    unknownActivityCoverage(),
 		Colour:              machine.Colour,
+		TargetChangedAt:     machine.TargetChangedAt,
 	}
 }
 
@@ -226,17 +242,28 @@ func denseActivity(activity []float64) []float64 {
 	return make([]float64, activityBuckets)
 }
 
-func machineStatus(machine store.Machine) string {
+func unknownActivityCoverage() []string {
+	result := make([]string, activityBuckets)
+	for i := range result {
+		result[i] = "unknown"
+	}
+	return result
+}
+
+func machineStatusAt(machine store.Machine, now time.Time, maxAge time.Duration) string {
 	if !machine.Enabled {
 		return statusDisabled
 	}
 	if machine.ConsecutiveFailures >= downAfterFailures {
 		return statusDown
 	}
-	if machine.ConsecutiveFailures >= degradedAfterFailures {
-		return statusDegraded
-	}
 	if machine.LastOKAt == nil {
+		return statusNever
+	}
+	if now.Sub(*machine.LastOKAt) > maxAge || machine.LastOKAt.After(now) {
+		return statusStale
+	}
+	if machine.ConsecutiveFailures >= degradedAfterFailures {
 		return statusDegraded
 	}
 	return statusOK

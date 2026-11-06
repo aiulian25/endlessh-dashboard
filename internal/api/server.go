@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /readyz", s.handleReady)
 
 	mux.Handle("POST /api/login", s.public(s.handleLogin))
 	mux.Handle("POST /api/logout", s.protected(s.handleLogout))
@@ -122,15 +123,36 @@ func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 	writer.Write([]byte("ok"))
 }
 
+// Readiness measures poller-loop progress, independently of target availability.
+// Liveness stays compatible and neither check initiates network collection.
+func (s *Server) handleReady(writer http.ResponseWriter, _ *http.Request) {
+	worker, ok := s.prober.(interface{ WorkerReady(time.Time) bool })
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-store")
+	if !ok || !worker.WorkerReady(time.Now().UTC()) {
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		writer.Write([]byte("collector not ready"))
+		return
+	}
+	writer.WriteHeader(http.StatusOK)
+	writer.Write([]byte("ready"))
+}
+
 func writeJSON(writer http.ResponseWriter, status int, payload any) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-	writer.WriteHeader(status)
 	if payload == nil {
+		writer.WriteHeader(status)
 		return
 	}
-	if err := json.NewEncoder(writer).Encode(payload); err != nil {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		slog.Error("encode API response", "error", err)
+		writer.WriteHeader(http.StatusInternalServerError)
+		writer.Write([]byte("{\"error\":\"could not encode response\"}\n"))
 		return
 	}
+	writer.WriteHeader(status)
+	writer.Write(append(encoded, '\n'))
 }
 
 type errorResponse struct {
@@ -178,7 +200,7 @@ func (s *Server) resolveMachines(request *http.Request) ([]store.Machine, error)
 
 	// An id matching no machine selects no machine, and the dashboard depends on
 	// that: it sends machines=0 to say the operator deselected everything, since
-	// an empty parameter would mean "not specified" and report on all of them.
+	// an empty parameter would mean "not specified" and report on enabled machines.
 	// What makes 0 unmatchable is that the machines table autoincrements from 1
 	// (0001_init.sql), asserted by TestMachineCRUD. Ids starting anywhere else
 	// would turn "none" into "one" here, silently — see NO_MACHINES in web/app.js.

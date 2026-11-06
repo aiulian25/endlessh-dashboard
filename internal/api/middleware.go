@@ -170,7 +170,13 @@ func (s *Server) useSecureCookies(request *http.Request) bool {
 	if request.TLS != nil {
 		return true
 	}
-	return strings.EqualFold(request.Header.Get(forwardedProtoHeader), "https")
+	// The immediate trusted proxy must overwrite this header with one scheme,
+	// not append a chain or preserve values supplied by an external client.
+	if !s.isTrustedProxy(peerHost(request)) {
+		return false
+	}
+	values := request.Header.Values(forwardedProtoHeader)
+	return len(values) == 1 && strings.EqualFold(strings.TrimSpace(values[0]), "https")
 }
 
 func (s *Server) setSessionCookie(writer http.ResponseWriter, request *http.Request, token string, expires time.Time) {
@@ -219,10 +225,7 @@ func (s *Server) clientKey(request *http.Request, username string) string {
 // reports the last hop rather than the original client — the safe direction to
 // be wrong in, because the alternative is trusting an attacker's header.
 func (s *Server) clientHost(request *http.Request) string {
-	host, _, err := net.SplitHostPort(request.RemoteAddr)
-	if err != nil {
-		host = request.RemoteAddr
-	}
+	host := peerHost(request)
 	if !s.isTrustedProxy(host) {
 		return host
 	}
@@ -231,6 +234,15 @@ func (s *Server) clientHost(request *http.Request) string {
 		return host
 	}
 	return forwarded
+}
+
+// peerHost uses only the socket peer, never a forwarded client address.
+func peerHost(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		return request.RemoteAddr
+	}
+	return host
 }
 
 func (s *Server) isTrustedProxy(host string) bool {

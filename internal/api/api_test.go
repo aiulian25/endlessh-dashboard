@@ -95,15 +95,16 @@ func newHarness(t *testing.T, options ...func(*config.Config)) *harness {
 	t.Helper()
 	directory := t.TempDir()
 	configuration := &config.Config{
-		DataDirectory:   directory,
-		ScrapeInterval:  testScrapeInterval,
-		ScrapeTimeout:   5 * time.Second,
-		RetentionDays:   90,
-		AdminUsername:   seedUsername,
-		AdminPassword:   seedPassword,
-		SecureCookies:   config.SecureCookieAuto,
-		BackupKeepLast:  7,
-		SessionLifetime: 12 * time.Hour,
+		DataDirectory:     directory,
+		ScrapeInterval:    testScrapeInterval,
+		ScrapeConcurrency: 4,
+		ScrapeTimeout:     5 * time.Second,
+		RetentionDays:     90,
+		AdminUsername:     seedUsername,
+		AdminPassword:     seedPassword,
+		SecureCookies:     config.SecureCookieAuto,
+		BackupKeepLast:    7,
+		SessionLifetime:   12 * time.Hour,
 	}
 	for _, option := range options {
 		option(configuration)
@@ -462,7 +463,15 @@ func TestLoginCookieIsHttpOnlyAndSameSiteStrict(t *testing.T) {
 		t.Fatalf("Set-Cookie %q is marked Secure over plain HTTP in auto mode", plain.header.Get("Set-Cookie"))
 	}
 
-	behindProxy := testHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword),
+	spoofed := testHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword),
+		map[string]string{"X-Forwarded-Proto": "https"})
+	assertStatus(t, "POST /api/login with an untrusted scheme header", spoofed, http.StatusOK)
+	if spoofed.sessionCookie(t).Secure || spoofed.header.Get("Strict-Transport-Security") != "" {
+		t.Fatal("untrusted forwarded scheme influenced cookies or HSTS")
+	}
+	trustedHarness := newHarness(t, loopbackProxy)
+
+	behindProxy := trustedHarness.send(http.MethodPost, "/api/login", "", credentials(seedPassword),
 		map[string]string{"X-Forwarded-Proto": "https"})
 	assertStatus(t, "POST /api/login behind an HTTPS proxy", behindProxy, http.StatusOK)
 
@@ -655,7 +664,7 @@ func TestMachinesLifecycle(t *testing.T) {
 	}
 	assertJSONKeys(t, "POST /api/machines", created.body,
 		"id", "name", "host", "port", "metrics_path", "group_label", "enabled", "status",
-		"last_scrape_at", "last_ok_at", "consecutive_failures", "last_error", "trapped_now", "activity", "colour")
+		"last_scrape_at", "last_ok_at", "consecutive_failures", "last_error", "trapped_now", "activity", "colour", "activity_threshold_seconds", "activity_coverage")
 
 	listed := testHarness.request(http.MethodGet, "/api/machines", nil)
 	assertStatus(t, "GET /api/machines", listed, http.StatusOK)
@@ -830,7 +839,7 @@ func TestOverviewReportsSeededTraffic(t *testing.T) {
 	assertJSONKeys(t, "GET /api/overview", answer.body,
 		"time_wasted_seconds", "time_wasted_delta_seconds", "attackers_trapped",
 		"attackers_trapped_delta", "bytes_sent", "bytes_sent_delta", "trapped_now", "machine_count",
-		"unique_attackers", "countries", "latest_attacker")
+		"unique_attackers", "countries", "latest_attacker", "from", "to", "activity")
 
 	var everything overviewResponse
 	answer.decode(t, &everything)
@@ -918,7 +927,7 @@ func TestTimeSeriesShapeAndWindowFallback(t *testing.T) {
 	if len(rawPoints) == 0 {
 		t.Fatal("a series came back with no points")
 	}
-	assertJSONKeys(t, "a series point", rawPoints[0], "t", "trapped_seconds", "opens", "bytes_sent")
+	assertJSONKeys(t, "a series point", rawPoints[0], "t", "to", "partial", "trapped_seconds", "opens", "bytes_sent", "coverage", "observed_seconds", "attempts", "successes", "uncertain_from", "uncertain_to")
 
 	total := 0.0
 	for _, series := range payload.Series {
@@ -978,7 +987,7 @@ func TestAttackersListing(t *testing.T) {
 
 	answer := testHarness.request(http.MethodGet, "/api/attackers", nil)
 	assertStatus(t, "GET /api/attackers", answer, http.StatusOK)
-	assertJSONKeys(t, "GET /api/attackers", answer.body, "total", "page", "per_page", "rows")
+	assertJSONKeys(t, "GET /api/attackers", answer.body, "total", "page", "per_page", "rows", "distinct_ips", "activity", "from", "to")
 
 	var page attackerPageResponse
 	answer.decode(t, &page)
@@ -1012,7 +1021,7 @@ func TestAttackersListing(t *testing.T) {
 	}
 	assertJSONKeys(t, "an attacker row", rawRows[0],
 		"ip", "machine_id", "machine_name", "country", "country_code", "geohash", "location",
-		"isp", "first_seen", "last_seen", "connections", "trapped_seconds", "status")
+		"isp", "first_seen", "last_seen", "connections", "trapped_seconds", "status", "last_observed_at", "last_measured_activity_at", "has_undated_history", "first_observation_known")
 
 	narrowed := testHarness.request(http.MethodGet, fmt.Sprintf("/api/attackers?machines=%d", second.ID), nil)
 	assertStatus(t, "GET /api/attackers?machines=", narrowed, http.StatusOK)
@@ -1044,7 +1053,7 @@ func TestAttackersListing(t *testing.T) {
 	}
 	var rawCountries []json.RawMessage
 	countries.decode(t, &rawCountries)
-	assertJSONKeys(t, "a country count", rawCountries[0], "country", "count")
+	assertJSONKeys(t, "a country count", rawCountries[0], "country", "country_code", "country_key", "count")
 }
 
 // The chips on the attackers page and the donut beside the map answer the same
@@ -1175,7 +1184,7 @@ func TestGeographyEndpointsReportPlacedAttackers(t *testing.T) {
 		t.Fatalf("the map holds %d bubbles, want one per city: %s", len(rawPoints), points.body)
 	}
 	assertJSONKeys(t, "a map bubble", rawPoints[0],
-		"lat", "lon", "country", "country_code", "attackers", "connections", "trapped_seconds")
+		"lat", "lon", "country", "country_code", "country_key", "attackers", "connections", "trapped_seconds")
 
 	var plotted []geoPointResponse
 	points.decode(t, &plotted)
@@ -1196,7 +1205,7 @@ func TestGeographyEndpointsReportPlacedAttackers(t *testing.T) {
 		t.Fatalf("the breakdown holds %d countries, want 2: %s", len(rawCountries), countries.body)
 	}
 	assertJSONKeys(t, "a country total", rawCountries[0],
-		"country", "country_code", "attackers", "connections")
+		"country", "country_code", "country_key", "attackers", "connections")
 
 	var breakdown []geoCountryResponse
 	countries.decode(t, &breakdown)
@@ -1240,9 +1249,9 @@ func TestSettingsNeverLeakSecrets(t *testing.T) {
 	answer := testHarness.request(http.MethodGet, "/api/settings", nil)
 	assertStatus(t, "GET /api/settings", answer, http.StatusOK)
 	assertJSONKeys(t, "GET /api/settings", answer.body,
-		"scrape_interval_seconds", "scrape_timeout_seconds", "retention_days",
+		"scrape_interval_seconds", "scrape_timeout_seconds", "scrape_concurrency", "retention_days",
 		"session_lifetime_seconds",
-		"geoip_enabled", "geoip_source", "geoip_online_enabled", "geoip_online_rate_per_minute",
+		"geoip_enabled", "geoip_source", "geoip_online_enabled", "geoip_online_provider_host", "geoip_online_rate_per_minute", "geoip_online_scheme",
 		"backup_keep_last", "backup_daily_enabled", "block_private", "version")
 
 	body := strings.ToLower(string(answer.body))

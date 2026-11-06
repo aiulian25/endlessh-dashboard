@@ -32,9 +32,10 @@ func TestTestMachineReportsAReachableTarget(t *testing.T) {
 	testHarness := newSignedInHarness(t)
 	testHarness.prober.err = nil
 	testHarness.prober.summary = scrape.ProbeSummary{
-		Address:    "192.168.1.10:2112",
-		Clients:    3,
-		LocalPorts: []string{"2222"},
+		MetricFamilies: []scrape.MetricFamilyEvidence{{Name: scrape.MetricOpenCountTotal, Type: "counter", Samples: 1}},
+		Address:        "192.168.1.10:2112",
+		Clients:        3,
+		LocalPorts:     []string{"2222"},
 	}
 
 	answer := testHarness.request(http.MethodPost, "/api/machines/test",
@@ -46,7 +47,7 @@ func TestTestMachineReportsAReachableTarget(t *testing.T) {
 	if payload.Clients != 3 || payload.Address != "192.168.1.10:2112" {
 		t.Errorf("probe response = %+v, want the summary the prober returned", payload)
 	}
-	for _, fragment := range []string{"Reached endlessh-go", "192.168.1.10:2112", "2222", "3 attackers"} {
+	for _, fragment := range []string{"Supported Endlessh metric samples", "partial evidence", "192.168.1.10:2112", "2222", "3 distinct IPs"} {
 		if !strings.Contains(payload.Message, fragment) {
 			t.Errorf("message %q does not mention %q", payload.Message, fragment)
 		}
@@ -65,8 +66,8 @@ func TestTestMachineExplainsAnEmptyButHealthyTarget(t *testing.T) {
 
 	var payload probeResponse
 	answer.decode(t, &payload)
-	if !strings.Contains(payload.Message, "No attackers recorded there yet") {
-		t.Errorf("message %q should reassure that an empty tarpit is normal", payload.Message)
+	if !strings.Contains(payload.Message, "No Endlessh samples yet; result is inconclusive") {
+		t.Errorf("message %q should qualify the unverified empty exporter", payload.Message)
 	}
 }
 
@@ -82,6 +83,7 @@ func TestTestMachineTranslatesFailures(t *testing.T) {
 		{"unknown host", errors.New(`request failed: dial tcp: lookup nope.invalid: no such host`), http.StatusBadGateway, "does not resolve"},
 		{"not metrics", errors.New("parse metrics: unexpected token"), http.StatusBadGateway, "not Prometheus metrics"},
 		{"wrong status", errors.New("metrics endpoint returned 404 Not Found"), http.StatusBadGateway, "not with metrics"},
+		{"oversized metrics", errors.New("metrics response exceeds 8388608-byte limit (8 MiB)"), http.StatusBadGateway, "8388608-byte limit"},
 	}
 
 	for _, testCase := range cases {

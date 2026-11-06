@@ -2,10 +2,10 @@ package api
 
 import (
 	"net/http"
-	"time"
 )
 
 type geoPointResponse struct {
+	CountryKey     string  `json:"country_key"`
 	Latitude       float64 `json:"lat"`
 	Longitude      float64 `json:"lon"`
 	Country        string  `json:"country"`
@@ -16,6 +16,7 @@ type geoPointResponse struct {
 }
 
 type geoCountryResponse struct {
+	CountryKey  string `json:"country_key"`
 	Country     string `json:"country"`
 	CountryCode string `json:"country_code"`
 	Attackers   int    `json:"attackers"`
@@ -30,9 +31,12 @@ func (s *Server) handleGeoPoints(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 
-	windowDuration, _ := resolveWindow(request)
+	span, _, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
 	points, err := s.store.GeoPoints(
-		request.Context(), machineIDs(machines), time.Now().UTC().Add(-windowDuration))
+		request.Context(), machineIDs(machines), span.From, span.To)
 	if err != nil {
 		s.logger.Error("geo points", "error", err)
 		writeError(writer, http.StatusInternalServerError, "could not load the map data")
@@ -45,6 +49,7 @@ func (s *Server) handleGeoPoints(writer http.ResponseWriter, request *http.Reque
 			Latitude:       point.Latitude,
 			Longitude:      point.Longitude,
 			Country:        point.Country,
+			CountryKey:     point.CountryKey,
 			CountryCode:    point.CountryCode,
 			Attackers:      point.Attackers,
 			Connections:    point.Connections,
@@ -62,9 +67,12 @@ func (s *Server) handleGeoCountries(writer http.ResponseWriter, request *http.Re
 		return
 	}
 
-	windowDuration, _ := resolveWindow(request)
-	totals, err := s.store.CountryTotals(
-		request.Context(), machineIDs(machines), time.Now().UTC().Add(-windowDuration))
+	span, _, ok := readTimeRange(writer, request)
+	if !ok {
+		return
+	}
+	totals, err := s.store.CountryTotalsInRange(
+		request.Context(), machineIDs(machines), span, false)
 	if err != nil {
 		s.logger.Error("country totals", "error", err)
 		writeError(writer, http.StatusInternalServerError, "could not load the country breakdown")
@@ -75,6 +83,7 @@ func (s *Server) handleGeoCountries(writer http.ResponseWriter, request *http.Re
 	for _, total := range totals {
 		payload = append(payload, geoCountryResponse{
 			Country:     total.Country,
+			CountryKey:  total.CountryKey,
 			CountryCode: total.CountryCode,
 			Attackers:   total.Attackers,
 			Connections: total.Connections,
