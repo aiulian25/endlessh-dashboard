@@ -1,24 +1,21 @@
-name: endlessh-dashboard-e2e
-
-# Stack for e2e/smoke_test.go:
-#   docker compose -f e2e/docker-compose.e2e.yml up --build -d
-#   E2E=1 go test -tags e2e -count=1 -timeout 15m ./e2e/...
-#   docker compose -f e2e/docker-compose.e2e.yml down -v
-
+# Run through ./e2e/run.sh: unique project/image and ephemeral loopback ports.
 services:
   tarpit:
-    image: ghcr.io/shizunge/endlessh-go:latest
+    image: ${E2E_EXPORTER_IMAGE:?Run through e2e/run.sh}
     command:
       - -logtostderr
       - -v=1
-      - -enable_prometheus
+      - -prometheus_enabled
+      - -geoip_supplier=off
       - -prometheus_port=2112
     ports:
-      - "127.0.0.1:2222:2222"
+      - "127.0.0.1::2222"
+      - "127.0.0.1::2112"
     networks:
       - e2e
 
   dashboard:
+    image: ${E2E_DASHBOARD_IMAGE:?Run through e2e/run.sh}
     build:
       context: ..
       dockerfile: Dockerfile
@@ -40,12 +37,11 @@ services:
       BACKUP_DAILY: "false"
       TZ: UTC
 
-      # GEOIP_ONLINE is deliberately absent and must stay that way: it would have
-      # every e2e run post attacker addresses to a third party from whatever host
-      # the suite happens to run on. assertGeography in smoke_test.go fails if it
-      # is ever switched on, here or by a changed default.
+      # Pin both enrichment sources off independently of application defaults.
+      GEOIP_ONLINE: "false"
+      GEOIP_MMDB_PATH: ""
     ports:
-      - "127.0.0.1:18222:18222"
+      - "127.0.0.1::18222"
     read_only: true
     # tmpfs, world-writable so the nonroot uid can create the database: every run starts clean
     tmpfs:

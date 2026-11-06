@@ -1,10 +1,7 @@
 //go:build e2e
 
-// Package e2e drives the stack in docker-compose.e2e.yml: a real endlessh-go tarpit plus the
-// dashboard built from this repo. Run it with:
-//
-//	docker compose -f e2e/docker-compose.e2e.yml up --build -d
-//	E2E=1 go test -tags e2e -count=1 -timeout 15m ./e2e/...
+// Package e2e drives a digest-pinned exporter and isolated dashboard.
+// Run through make e2e (or ./e2e/run.sh); the harness owns setup and teardown.
 package e2e
 
 import (
@@ -207,9 +204,14 @@ func envOr(key, fallback string) string {
 
 func TestTarpitTrafficReachesDashboard(t *testing.T) {
 	if os.Getenv("E2E") != "1" {
-		t.Skip("e2e disabled: start the stack with `docker compose -f e2e/docker-compose.e2e.yml up --build -d` and re-run with E2E=1")
+		t.Skip("e2e disabled: run make e2e for an isolated stack with verified cleanup")
 	}
 
+	const image = "ghcr.io/shizunge/endlessh-go:2026.0730.0@sha256:8826dad32623c503ec862f9266c1374da3f4a2821e8f9356bda5463a335b6225"
+	if os.Getenv("E2E_EXPORTER_VERSION") != "2026.0730.0" || os.Getenv("E2E_EXPORTER_IMAGE") != image {
+		t.Fatal("run through e2e/run.sh to verify the supported exporter identity")
+	}
+	t.Logf("exporter release 2026.0730.0, verified container image %s", image)
 	baseURL := envOr("E2E_BASE_URL", defaultBaseURL)
 	tarpitAddr := envOr("E2E_TARPIT_ADDR", defaultTarpitAddr)
 
@@ -278,6 +280,7 @@ func TestTarpitTrafficReachesDashboard(t *testing.T) {
 	}
 
 	assertGeography(t, api, first)
+	captureExporterFixture(t, tarpitAddr)
 }
 
 // assertGeography covers the map surface against the same window as the rest of
@@ -288,10 +291,8 @@ func TestTarpitTrafficReachesDashboard(t *testing.T) {
 func assertGeography(t *testing.T, c *client, trapped attacker) {
 	t.Helper()
 
-	// The one thing this stack must never do. GEOIP_ONLINE is simply absent from
-	// docker-compose.e2e.yml; this asserts the effect rather than trusting the
-	// omission, because a default flipped to on would quietly have every e2e run
-	// posting attacker addresses to a third party from whatever host it runs on.
+	// The stack pins enrichment off; assert the effective configuration too.
+	// A changed default must not send fixture addresses to an external provider.
 	var effective settings
 	c.must(t, http.MethodGet, "/api/settings", nil, &effective)
 	if effective.GeoIPOnlineEnabled {
@@ -521,5 +522,50 @@ func waitFor(t *testing.T, what string, timeout time.Duration, check func() (boo
 			t.Fatalf("timed out after %s waiting for %s; last observation: %s", timeout, what, last)
 		}
 		time.Sleep(pollEvery)
+	}
+}
+
+// Keep the exact observed metric contract with the logs, not in a container
+// that teardown removes. These are only synthetic test connection addresses.
+func captureExporterFixture(t *testing.T, tarpitAddr string) {
+	t.Helper()
+	endpoint := os.Getenv("E2E_METRICS_URL")
+	if endpoint == "" {
+		t.Fatal("missing harness metrics endpoint")
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// Counter vectors are lazy: the closed family is absent until a client has
+	// actually disconnected. Exercise that transition before recording its type.
+	probe, err := net.DialTimeout("tcp", tarpitAddr, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Close()
+	var body []byte
+	waitFor(t, "the exporter counter fixture", dataTimeout, func() (bool, string) {
+		response, err := client.Get(endpoint)
+		if err != nil {
+			return false, err.Error()
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return false, fmt.Sprintf("metrics status %d", response.StatusCode)
+		}
+		body, err = io.ReadAll(io.LimitReader(response.Body, 4<<20))
+		if err != nil {
+			return false, err.Error()
+		}
+		for _, name := range []string{"endlessh_client_closed_count_total", "endlessh_client_open_count", "endlessh_client_open_count_total", "endlessh_client_trapped_time_seconds", "endlessh_sent_bytes_total", "endlessh_trapped_time_seconds_total"} {
+			if !bytes.Contains(body, []byte("# TYPE "+name+" counter")) {
+				return false, "missing counter family " + name
+			}
+		}
+		return true, ""
+	})
+	if path := os.Getenv("E2E_FIXTURE_PATH"); path != "" {
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
