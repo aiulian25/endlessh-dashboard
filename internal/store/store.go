@@ -55,6 +55,10 @@ func Open(path string) (*Store, error) {
 	}
 
 	store := &Store{database: database}
+	if err := store.checkMigrationCompatibility(context.Background()); err != nil {
+		database.Close()
+		return nil, err
+	}
 	if err := store.ensureIncrementalAutoVacuum(); err != nil {
 		database.Close()
 		return nil, err
@@ -90,7 +94,26 @@ func (s *Store) ensureIncrementalAutoVacuum() error {
 	return nil
 }
 
+// checkMigrationCompatibility runs before startup vacuum or migration writes.
+func (s *Store) checkMigrationCompatibility(ctx context.Context) error {
+	var present int
+	if err := s.database.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&present); err != nil {
+		return err
+	}
+	if present != 0 {
+		if _, err := s.appliedMigrations(ctx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.checkMigrationCompatibility(ctx); err != nil {
+		return err
+	}
+
 	if _, err := s.database.ExecContext(ctx,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    INTEGER PRIMARY KEY,
@@ -143,7 +166,27 @@ func (s *Store) appliedMigrations(ctx context.Context) (map[int]bool, error) {
 		}
 		applied[version] = true
 	}
-	return applied, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	latest, err := LatestMigrationVersion()
+	if err != nil {
+		return nil, err
+	}
+	for version := range applied {
+		if version > latest {
+			return nil, fmt.Errorf("%w: found version %d, this build supports %d", ErrDatabaseTooNew, version, latest)
+		}
+		if version < 1 {
+			return nil, fmt.Errorf("invalid migration sequence")
+		}
+	}
+	for version := 1; version <= len(applied); version++ {
+		if !applied[version] {
+			return nil, fmt.Errorf("incomplete migration sequence")
+		}
+	}
+	return applied, nil
 }
 
 func (s *Store) applyMigration(ctx context.Context, version int, statements string) error {
@@ -155,6 +198,11 @@ func (s *Store) applyMigration(ctx context.Context, version int, statements stri
 
 	if _, err := transaction.ExecContext(ctx, statements); err != nil {
 		return err
+	}
+	if version == 10 {
+		if err := migrateIPIdentities(ctx, transaction); err != nil {
+			return err
+		}
 	}
 	if _, err := transaction.ExecContext(ctx,
 		"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",

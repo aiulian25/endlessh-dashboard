@@ -52,11 +52,44 @@ type BackupManager struct {
 	directory    string
 	databasePath string
 	keepLast     int
-	// creating serialises Create. Backup names have one-second resolution, so
-	// two calls in the same second name the same file; left to race, both get
-	// past the check that it does not exist yet and the loser fails on a
-	// half-written snapshot rather than being handed the one that won.
+	// creating serialises publication, rotation and deletion within this manager.
+	// In particular a same-second caller verifies the completed winner's file.
 	creating sync.Mutex
+	files    backupFileOperations
+}
+
+// File operations are owned by each manager; tests inject storage failures
+// without filling the host disk or touching the live volume.
+type backupFileOperations struct {
+	snapshot      func(context.Context, string) error
+	chmod         func(string, os.FileMode) error
+	sync          func(string) error
+	publish       func(string, string) error
+	syncDirectory func(string) error
+}
+
+func syncBackupFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func syncBackupDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err = directory.Sync(); err != nil {
+		directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 func NewBackupManager(store *Store, directory, databasePath string, keepLast int) *BackupManager {
@@ -65,6 +98,13 @@ func NewBackupManager(store *Store, directory, databasePath string, keepLast int
 		directory:    directory,
 		databasePath: databasePath,
 		keepLast:     keepLast,
+		files: backupFileOperations{
+			snapshot: func(ctx context.Context, path string) error {
+				_, err := store.database.ExecContext(ctx, "VACUUM INTO ?", path)
+				return err
+			},
+			chmod: os.Chmod, sync: syncBackupFile, publish: os.Link, syncDirectory: syncBackupDirectory,
+		},
 	}
 }
 
@@ -78,8 +118,29 @@ func (m *BackupManager) EnsureDirectory() error {
 // Create writes a consistent snapshot with VACUUM INTO. A plain file copy of a
 // live database can tear mid-write; VACUUM INTO takes SQLite's own snapshot.
 func (m *BackupManager) Create(ctx context.Context) (BackupInfo, error) {
-	m.creating.Lock()
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	// Publication also shares this lock with restore/delete operations. A daily
+	// worker waiting here must be able to leave when shutdown cancels its context.
+	if !m.creating.TryLock() {
+		retry := time.NewTicker(10 * time.Millisecond)
+		defer retry.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return BackupInfo{}, ctx.Err()
+			case <-retry.C:
+			}
+			if m.creating.TryLock() {
+				break
+			}
+		}
+	}
 	defer m.creating.Unlock()
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
 
 	if err := m.EnsureDirectory(); err != nil {
 		return BackupInfo{}, err
@@ -88,26 +149,72 @@ func (m *BackupManager) Create(ctx context.Context) (BackupInfo, error) {
 	name := backupNamePrefix + createdAt.Format(backupNameLayout) + backupNameSuffix
 	destination := filepath.Join(m.directory, name)
 
-	// A backup asked for in the same second as the last one is that backup. The
-	// name has one-second resolution, so a second click on "Back up now", or a
-	// manual one landing in the same second as the worker's, would otherwise be
-	// reported as a failure for a snapshot that exists and is current. Nothing
-	// is rotated here: no file was added.
-	if existing, err := os.Stat(destination); err == nil {
+	// Reuse only a verified completed snapshot. A failed verification must
+	// never overwrite or remove a pre-existing file, which may be the only copy.
+	if existing, err := os.Lstat(destination); err == nil {
+		if !existing.Mode().IsRegular() {
+			return BackupInfo{}, fmt.Errorf("backup destination is not a regular file")
+		}
+		if err := verifyDatabaseFileContext(ctx, destination); err != nil {
+			return BackupInfo{}, fmt.Errorf("existing backup could not be verified: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return BackupInfo{}, err
+		}
 		return BackupInfo{Name: name, Size: existing.Size(), CreatedAt: createdAt}, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return BackupInfo{}, fmt.Errorf("inspect backup destination: %w", err)
 	}
-	if _, err := m.store.database.ExecContext(ctx, "VACUUM INTO ?", destination); err != nil {
+
+	temporary, err := os.CreateTemp(m.directory, ".snapshot-*")
+	if err != nil {
+		return BackupInfo{}, err
+	}
+	pending := temporary.Name()
+	defer os.Remove(pending)
+	defer removeSidecars(pending)
+	if err := temporary.Close(); err != nil {
+		return BackupInfo{}, err
+	}
+	if err := m.files.snapshot(ctx, pending); err != nil {
 		return BackupInfo{}, fmt.Errorf("create backup: %w", err)
 	}
-	if err := os.Chmod(destination, backupFileMode); err != nil {
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	if err := m.files.chmod(pending, backupFileMode); err != nil {
 		return BackupInfo{}, fmt.Errorf("secure backup file: %w", err)
+	}
+	if err := verifyDatabaseFileContext(ctx, pending); err != nil {
+		return BackupInfo{}, fmt.Errorf("verify backup: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	if err := m.files.sync(pending); err != nil {
+		return BackupInfo{}, fmt.Errorf("sync backup: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	// A hard link publishes atomically without overwriting a competing snapshot.
+	// Both names are on the same filesystem; the hidden link is removed on return.
+	if err := m.files.publish(pending, destination); err != nil {
+		return BackupInfo{}, fmt.Errorf("publish backup: %w", err)
+	}
+	if err := m.files.syncDirectory(m.directory); err != nil {
+		os.Remove(destination)
+		return BackupInfo{}, fmt.Errorf("sync backup directory: %w", err)
 	}
 
 	info, err := os.Stat(destination)
 	if err != nil {
 		return BackupInfo{}, fmt.Errorf("stat backup: %w", err)
 	}
-	if err := m.Rotate(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return BackupInfo{}, err
+	}
+	if err := m.rotate(); err != nil {
 		return BackupInfo{}, err
 	}
 	return BackupInfo{Name: name, Size: info.Size(), CreatedAt: createdAt}, nil
@@ -144,6 +251,12 @@ func (m *BackupManager) List() ([]BackupInfo, error) {
 }
 
 func (m *BackupManager) Rotate() error {
+	m.creating.Lock()
+	defer m.creating.Unlock()
+	return m.rotate()
+}
+
+func (m *BackupManager) rotate() error {
 	backups, err := m.List()
 	if err != nil {
 		return err
@@ -173,6 +286,8 @@ func (m *BackupManager) Path(name string) (string, error) {
 }
 
 func (m *BackupManager) Delete(name string) error {
+	m.creating.Lock()
+	defer m.creating.Unlock()
 	path, err := m.Path(name)
 	if err != nil {
 		return err
@@ -187,6 +302,11 @@ func (m *BackupManager) Delete(name string) error {
 // database. ApplyPendingRestore swaps it in at the next start, when nothing
 // holds the file open.
 func (m *BackupManager) StageRestore(name string) error {
+	m.creating.Lock()
+	defer m.creating.Unlock()
+	if err := checkRestoreIdle(m.databasePath); err != nil {
+		return err
+	}
 	source, err := m.Path(name)
 	if err != nil {
 		return err
@@ -200,6 +320,11 @@ func (m *BackupManager) StageRestore(name string) error {
 // StageRestoreFromReader accepts an uploaded database file, verifying it before
 // it is allowed anywhere near the live data.
 func (m *BackupManager) StageRestoreFromReader(reader io.Reader) error {
+	m.creating.Lock()
+	defer m.creating.Unlock()
+	if err := checkRestoreIdle(m.databasePath); err != nil {
+		return err
+	}
 	if err := m.EnsureDirectory(); err != nil {
 		return err
 	}
@@ -228,48 +353,6 @@ func (m *BackupManager) StageRestoreFromReader(reader io.Reader) error {
 	return copyFile(temporaryPath, m.databasePath+restorePendingExt)
 }
 
-// ApplyPendingRestore swaps in a staged restore. It runs before the database is
-// opened, so the live file is never replaced underneath an open connection.
-func ApplyPendingRestore(databasePath string) (bool, error) {
-	pending := databasePath + restorePendingExt
-	if _, err := os.Stat(pending); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, fmt.Errorf("check pending restore: %w", err)
-	}
-
-	// A staged file that no longer verifies is moved aside rather than left in
-	// place: blocking every future start on it would turn one bad upload into an
-	// outage that needs a shell the runtime image does not have.
-	if err := VerifyDatabaseFile(pending); err != nil {
-		rejected := pending + ".rejected"
-		if renameErr := os.Rename(pending, rejected); renameErr != nil {
-			return false, fmt.Errorf("staged restore is unusable (%w) and could not be moved aside: %v", err, renameErr)
-		}
-		// The rejected file's own log goes too. Left here it would sit exactly
-		// where the next staged restore is written and be read as that file's
-		// log — turning one refused upload into a corrupted second attempt.
-		if sidecarErr := removeSidecars(pending); sidecarErr != nil {
-			return false, fmt.Errorf("staged restore was rejected (%w) and its log could not be cleared: %v", err, sidecarErr)
-		}
-		return false, fmt.Errorf("staged restore was rejected and moved to %s: %w", rejected, err)
-	}
-	if err := keepReplacedDatabase(databasePath); err != nil {
-		return false, err
-	}
-	if err := os.Rename(pending, databasePath); err != nil {
-		return false, fmt.Errorf("apply restore: %w", err)
-	}
-	// Verifying the staged file opened it, and opening a database in WAL mode
-	// writes a -shm beside it. The rename moves only the file itself, so without
-	// this the pair is left in the data directory for ever — and is waiting there
-	// to be read as the next staged restore's own log.
-	if err := removeSidecars(pending); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // removeSidecars deletes the -wal and -shm files SQLite writes beside a
 // database. They carry no meaning once separated from the file they belong to,
 // and beside a different file they are worse than meaningless.
@@ -282,52 +365,22 @@ func removeSidecars(databasePath string) error {
 	return nil
 }
 
-// keepReplacedDatabase moves the live database aside instead of deleting it, so
-// a restore of the wrong snapshot can be undone. The runtime image has no shell:
-// once this file is gone there is nothing inside the container that can bring it
-// back, and the operator's only remaining copy is whatever they took off-host.
-//
-// The write-ahead log moves with it. A WAL-mode database keeps committed
-// transactions in -wal until they are checkpointed, so a copy taken without its
-// log is a copy missing whatever was written last — and leaving the log beside
-// the restored database instead would pair it with a file it was never written
-// for. Moving both solves the same two problems in one step.
-func keepReplacedDatabase(databasePath string) error {
-	previous := databasePath + restorePreviousExt
-
-	// The prior generation's log goes first either way. A leftover -wal belongs
-	// to the database it was written with; pairing it with a different one is
-	// how a readable file is turned into an unreadable one.
-	if err := removeSidecars(previous); err != nil {
-		return err
-	}
-
-	if err := os.Rename(databasePath, previous); err != nil {
-		// Nothing to keep: a restore staged before this instance ever opened a
-		// database of its own. The restore itself is unaffected.
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("keep the replaced database: %w", err)
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		if err := os.Rename(databasePath+suffix, previous+suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("keep the replaced database: %w", err)
-		}
-	}
-	return nil
-}
-
 // VerifyDatabaseFile refuses anything that is not a healthy database of ours.
 func VerifyDatabaseFile(path string) error {
-	database, err := sql.Open(driverName, fmt.Sprintf("file:%s?mode=ro", path))
+	return verifyDatabaseFileContext(context.Background(), path)
+}
+
+func verifyDatabaseFileContext(parent context.Context, path string) error {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	database, err := sql.Open(driverName, readOnlyURI(path))
 	if err != nil {
 		return fmt.Errorf("open backup for verification: %w", err)
 	}
 	defer database.Close()
 
 	var result string
-	if err := database.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+	if err := database.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
 		return fmt.Errorf("backup failed integrity check: %w", err)
 	}
 	if result != "ok" {
@@ -335,7 +388,7 @@ func VerifyDatabaseFile(path string) error {
 	}
 
 	var tableCount int
-	if err := database.QueryRow(
+	if err := database.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
 	).Scan(&tableCount); err != nil {
 		return fmt.Errorf("inspect backup: %w", err)
@@ -354,14 +407,14 @@ func VerifyDatabaseFile(path string) error {
 		return err
 	}
 	var found int
-	if err := database.QueryRow(
+	if err := database.QueryRowContext(ctx,
 		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&found); err != nil {
 		return fmt.Errorf("inspect backup: %w", err)
 	}
 	if found > latest {
 		return fmt.Errorf("%w: found version %d, this build supports %d", ErrDatabaseTooNew, found, latest)
 	}
-	return nil
+	return verifyApplicationDatabase(ctx, database, filepath.Dir(path))
 }
 
 func backupTimestamp(name string, fallback time.Time) time.Time {
@@ -410,5 +463,5 @@ func copyFile(source, destination string) error {
 	if err := os.Rename(temporaryPath, destination); err != nil {
 		return fmt.Errorf("finalise %s: %w", destination, err)
 	}
-	return nil
+	return syncBackupDirectory(filepath.Dir(destination))
 }

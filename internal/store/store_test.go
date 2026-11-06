@@ -49,6 +49,24 @@ func createMachine(t *testing.T, store *Store, name string) Machine {
 
 func applyScrape(t *testing.T, store *Store, delta ScrapeDelta) {
 	t.Helper()
+	machine, err := store.GetMachine(context.Background(), delta.MachineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stamp any
+	if err = store.DB().QueryRow("SELECT last_metric_sample_ns FROM machines WHERE id=?", delta.MachineID).Scan(&stamp); err != nil {
+		t.Fatal(err)
+	}
+	// This helper builds historical query fixtures, not scheduled scrape results.
+	if _, err = store.DB().Exec("UPDATE machines SET enabled=1,last_metric_sample_ns=NULL WHERE id=?", delta.MachineID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := store.DB().Exec("UPDATE machines SET enabled=?,last_metric_sample_ns=? WHERE id=?", machine.Enabled, stamp, delta.MachineID); err != nil {
+			t.Error(err)
+		}
+	}()
+	delta.TargetGeneration = machine.TargetGeneration
 	if err := store.ApplyScrape(context.Background(), delta); err != nil {
 		t.Fatalf("ApplyScrape: %v", err)
 	}
@@ -697,7 +715,7 @@ func TestTimeSeriesIsDenseAndAligned(t *testing.T) {
 		t.Fatalf("TimeSeries returned %d series, want one per machine", len(series))
 	}
 
-	wantPoints := 5
+	wantPoints := 4
 	for _, machineSeries := range series {
 		if len(machineSeries.Points) != wantPoints {
 			t.Fatalf("series %q has %d points, want %d", machineSeries.MachineName, len(machineSeries.Points), wantPoints)
@@ -718,18 +736,18 @@ func TestTimeSeriesIsDenseAndAligned(t *testing.T) {
 		t.Errorf("first series = %d/%q, want alpha", series[0].MachineID, series[0].MachineName)
 	}
 
-	wantAlphaOpens := []int64{12, 0, 3, 0, 0}
-	wantAlphaTrapped := []float64{3, 0, 4, 0, 0}
+	wantAlphaOpens := []int64{12, 0, 3, 0}
+	wantAlphaTrapped := []float64{3, 0, 4, 0}
 	for index, want := range wantAlphaOpens {
 		assertInt(t, "alpha opens bucket", series[0].Points[index].Opens, want)
 		assertFloat(t, "alpha trapped bucket", series[0].Points[index].TrappedSeconds, wantAlphaTrapped[index])
 	}
 
-	wantBetaOpens := []int64{0, 0, 0, 0, 9}
+	wantBetaOpens := []int64{0, 0, 0, 0}
 	for index, want := range wantBetaOpens {
 		assertInt(t, "beta opens bucket", series[1].Points[index].Opens, want)
 	}
-	assertInt(t, "beta bytes in last bucket", series[1].Points[4].BytesSent, 90)
+	assertInt(t, "end boundary excludes beta", series[1].Points[3].BytesSent, 0)
 
 	if none, err := store.TimeSeries(ctx, nil, from, to, bucketSeconds); err != nil || none != nil {
 		t.Errorf("TimeSeries with no machines = %v, %v, want nil, nil", none, err)
@@ -1173,7 +1191,7 @@ func TestUsers(t *testing.T) {
 		t.Errorf("GetUserByID unknown = %v, want ErrUserNotFound", err)
 	}
 
-	if err := store.UpdateUserPassword(ctx, created.ID, "hash-two", false); err != nil {
+	if err := store.UpdateUserPassword(ctx, created.ID, "hash-one", "hash-two", false); err != nil {
 		t.Fatalf("UpdateUserPassword: %v", err)
 	}
 	updated, err := store.GetUserByID(ctx, created.ID)
@@ -1184,8 +1202,8 @@ func TestUsers(t *testing.T) {
 		t.Errorf("after UpdateUserPassword = %+v, want hash-two and MustChangePassword false", updated)
 	}
 
-	if err := store.UpdateUserPassword(ctx, created.ID+9999, "x", false); !errors.Is(err, ErrUserNotFound) {
-		t.Errorf("UpdateUserPassword unknown = %v, want ErrUserNotFound", err)
+	if err := store.UpdateUserPassword(ctx, created.ID+9999, "hash-one", "x", false); !errors.Is(err, ErrCredentialsChanged) {
+		t.Errorf("UpdateUserPassword unknown = %v, want ErrCredentialsChanged", err)
 	}
 }
 
@@ -1225,7 +1243,7 @@ func TestSessions(t *testing.T) {
 		ExpiresAt: now.Add(time.Hour),
 	}
 	for _, session := range []Session{live, expired, otherUsers} {
-		if err := store.CreateSession(ctx, session); err != nil {
+		if err := store.CreateSession(ctx, session, user.PasswordHash); err != nil {
 			t.Fatalf("CreateSession(%s): %v", session.TokenHash, err)
 		}
 	}
@@ -1276,7 +1294,7 @@ func TestSessions(t *testing.T) {
 		if err := store.CreateSession(ctx, Session{
 			TokenHash: token, UserID: user.ID, CSRFToken: token,
 			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
-		}); err != nil {
+		}, user.PasswordHash); err != nil {
 			t.Fatalf("CreateSession(%s): %v", token, err)
 		}
 	}

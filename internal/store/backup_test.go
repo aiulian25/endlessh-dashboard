@@ -39,6 +39,16 @@ func scanIntFrom(t *testing.T, database *sql.DB, query string, args ...any) int6
 	return value
 }
 
+// Successful startup includes the explicit confirmation step before .previous
+// rotates. Interruption tests exercise the two phases independently.
+func applyConfirmedRestore(path string) (bool, error) {
+	applied, err := ApplyPendingRestore(path)
+	if err == nil && applied {
+		err = ConfirmPendingRestore(path)
+	}
+	return applied, err
+}
+
 func TestBackupCreateAndList(t *testing.T) {
 	store, manager, directory := newBackupManager(t, 5)
 	ctx := context.Background()
@@ -398,7 +408,7 @@ func TestStageAndApplyPendingRestore(t *testing.T) {
 		t.Fatalf("Close before restore: %v", err)
 	}
 
-	applied, err := ApplyPendingRestore(databasePath)
+	applied, err := applyConfirmedRestore(databasePath)
 	if err != nil {
 		t.Fatalf("ApplyPendingRestore: %v", err)
 	}
@@ -453,7 +463,7 @@ func TestStageRestoreRejectsAFileThatIsNotADatabase(t *testing.T) {
 func TestApplyPendingRestoreWithNothingStaged(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "endlessh.db")
 
-	applied, err := ApplyPendingRestore(databasePath)
+	applied, err := applyConfirmedRestore(databasePath)
 	if err != nil {
 		t.Fatalf("ApplyPendingRestore = %v, want no error", err)
 	}
@@ -500,7 +510,7 @@ func TestApplyPendingRestoreKeepsTheDatabaseItReplaced(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close before restore: %v", err)
 	}
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore: %v", err)
 	}
 
@@ -546,7 +556,7 @@ func TestPreviousCopyCanBeRestoredToUndoARestore(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close before restore: %v", err)
 	}
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore: %v", err)
 	}
 
@@ -570,7 +580,7 @@ func TestPreviousCopyCanBeRestoredToUndoARestore(t *testing.T) {
 	if err := reopened.Close(); err != nil {
 		t.Fatalf("close before the undo: %v", err)
 	}
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore(undo): %v", err)
 	}
 
@@ -604,7 +614,7 @@ func TestUndoingARestoreLeavesNoOrphanedLogsBehind(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close before restore: %v", err)
 	}
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore: %v", err)
 	}
 
@@ -630,7 +640,7 @@ func TestUndoingARestoreLeavesNoOrphanedLogsBehind(t *testing.T) {
 	if err := reopened.Close(); err != nil {
 		t.Fatalf("close before the undo: %v", err)
 	}
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore(undo): %v", err)
 	}
 
@@ -679,7 +689,7 @@ func TestApplyPendingRestoreClearsAStaleLogBesideTheKeptCopy(t *testing.T) {
 		t.Fatalf("plant a stale log: %v", err)
 	}
 
-	if _, err := ApplyPendingRestore(databasePath); err != nil {
+	if _, err := applyConfirmedRestore(databasePath); err != nil {
 		t.Fatalf("ApplyPendingRestore: %v", err)
 	}
 	if _, err := os.Stat(previous + "-wal"); !errors.Is(err, os.ErrNotExist) {
@@ -818,7 +828,7 @@ func TestRejectedRestoreLeavesNoLogWhereTheNextOneGoes(t *testing.T) {
 		t.Fatalf("Close before restore: %v", err)
 	}
 
-	applied, err := ApplyPendingRestore(databasePath)
+	applied, err := applyConfirmedRestore(databasePath)
 	if err == nil {
 		t.Fatal("ApplyPendingRestore accepted a staged database from a newer release")
 	}
