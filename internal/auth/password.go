@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"endlessh-dashboard/internal/credentials"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -57,6 +58,9 @@ func HashPassword(password string) (string, error) {
 // VerifyPassword compares in constant time and reports whether the stored hash
 // was produced with the current parameters.
 func VerifyPassword(encodedHash, password string) (bool, error) {
+	if credentials.ValidateHash(encodedHash) != nil {
+		return false, ErrInvalidHash
+	}
 	fields := strings.Split(encodedHash, "$")
 	if len(fields) != 6 || fields[1] != "argon2id" {
 		return false, ErrInvalidHash

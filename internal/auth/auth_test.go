@@ -132,6 +132,11 @@ func TestVerifyPasswordRejectsUnreadableHash(t *testing.T) {
 		{"neither salt nor key", strings.Join([]string{fields[0], fields[1], fields[2], fields[3], "", ""}, "$")},
 		{"no rounds", rebuild(3, "m=65536,t=0,p=4")},
 		{"no threads", rebuild(3, "m=65536,t=3,p=0")},
+		{"excess memory", rebuild(3, "m=4294967295,t=3,p=4")},
+		{"excess rounds", rebuild(3, "m=65536,t=4294967295,p=4")},
+		{"excess threads", rebuild(3, "m=65536,t=3,p=255")},
+		{"trailing parameters", rebuild(3, "m=65536,t=3,p=4,extra=1")},
+		{"oversized encoding", strings.Repeat("a", 513)},
 	}
 
 	for _, testCase := range cases {

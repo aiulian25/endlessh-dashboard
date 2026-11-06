@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	ErrUserNotFound    = errors.New("user not found")
-	ErrSessionNotFound = errors.New("session not found")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrSessionNotFound    = errors.New("session not found")
+	ErrCredentialsChanged = errors.New("credentials changed during authentication")
 )
 
 type User struct {
@@ -70,26 +71,46 @@ func (s *Store) CreateUser(ctx context.Context, user User) (User, error) {
 	return user, nil
 }
 
-func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string, mustChange bool) error {
-	result, err := s.database.ExecContext(ctx,
-		"UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?",
-		passwordHash, mustChange, userID)
+// UpdateUserPassword commits credential replacement and complete revocation as
+// one operation. The salted encoded hash is an opaque credential version: every
+// rotation produces a fresh salt, even when returning to an earlier password.
+// Password verification and hashing must finish before entering this transaction.
+func (s *Store) UpdateUserPassword(ctx context.Context, userID int64, verifiedHash, passwordHash string, mustChange bool) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin password change: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx,
+		"UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ? AND password_hash = ?",
+		passwordHash, mustChange, userID, verifiedHash)
 	if err != nil {
 		return fmt.Errorf("update password: %w", err)
 	}
-	return requireOneRow(result, ErrUserNotFound)
+	if err = requireOneRow(result, ErrCredentialsChanged); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM sessions WHERE user_id = ?", userID); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit password change: %w", err)
+	}
+	return nil
 }
 
-func (s *Store) CreateSession(ctx context.Context, session Session) error {
-	_, err := s.database.ExecContext(ctx,
+// CreateSession checks the exact credentials verified by the caller in the
+// insert itself. SQLite serializes this write against password rotation: a
+// session either precedes rotation (and is deleted) or stale credentials fail.
+func (s *Store) CreateSession(ctx context.Context, session Session, verifiedHash string) error {
+	result, err := s.database.ExecContext(ctx,
 		`INSERT INTO sessions (token_hash, user_id, csrf_token, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		session.TokenHash, session.UserID, session.CSRFToken,
-		session.CreatedAt.Unix(), session.ExpiresAt.Unix())
+   SELECT ?, id, ?, ?, ? FROM users WHERE id = ? AND password_hash = ?`,
+		session.TokenHash, session.CSRFToken, session.CreatedAt.Unix(), session.ExpiresAt.Unix(), session.UserID, verifiedHash)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
-	return nil
+	return requireOneRow(result, ErrCredentialsChanged)
 }
 
 // GetSession returns the live session and its owner, or ErrSessionNotFound when
@@ -138,7 +159,8 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	return nil
 }
 
-// DeleteSessionsForUser logs every other browser out, used after a password change.
+// DeleteSessionsForUser revokes a user's sessions without changing credentials.
+// Password changes must use the transactional UpdateUserPassword operation.
 func (s *Store) DeleteSessionsForUser(ctx context.Context, userID int64) error {
 	if _, err := s.database.ExecContext(ctx,
 		"DELETE FROM sessions WHERE user_id = ?", userID); err != nil {

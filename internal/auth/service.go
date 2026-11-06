@@ -30,7 +30,7 @@ const (
 	MaxUsernameLength = 64
 
 	// maxTrackedClients caps the throttle map even against many short usernames.
-	// Reaching it drops the stalest entries, never the locked-out ones.
+	// New keys are refused at capacity until records expire; live records are never evicted.
 	maxTrackedClients = 4096
 
 	// maxConcurrentHashes bounds how many Argon2id verifications run at once.
@@ -50,7 +50,7 @@ var (
 
 var (
 	ErrInvalidCredentials = errors.New("username or password is incorrect")
-	ErrTooManyAttempts    = errors.New("too many failed sign-in attempts, try again later")
+	ErrTooManyAttempts    = errors.New("too many sign-in attempts, try again later")
 	ErrSamePassword       = errors.New("new password must be different from the current one")
 	ErrBusy               = errors.New("the server is busy verifying other sign-ins, try again in a moment")
 )
@@ -59,6 +59,8 @@ type Service struct {
 	store        *store.Store
 	lifetime     time.Duration
 	hashingSlots chan struct{}
+	// Instance-owned verifier allows deterministic authentication interleavings in tests.
+	verifyPassword func(string, string) (bool, error)
 
 	mutex    sync.Mutex
 	attempts map[string]*attemptRecord
@@ -68,18 +70,20 @@ type attemptRecord struct {
 	count       int
 	firstFailed time.Time
 	lockedUntil time.Time
+	inFlight    bool
 }
 
 func (r *attemptRecord) staleAt(now time.Time) bool {
-	return now.After(r.lockedUntil) && now.Sub(r.firstFailed) > loginWindow
+	return !r.inFlight && !now.Before(r.lockedUntil) && now.Sub(r.firstFailed) >= loginWindow
 }
 
 func NewService(dataStore *store.Store, lifetime time.Duration) *Service {
 	return &Service{
-		store:        dataStore,
-		lifetime:     lifetime,
-		hashingSlots: make(chan struct{}, maxConcurrentHashes),
-		attempts:     map[string]*attemptRecord{},
+		store:          dataStore,
+		lifetime:       lifetime,
+		hashingSlots:   make(chan struct{}, maxConcurrentHashes),
+		verifyPassword: VerifyPassword,
+		attempts:       map[string]*attemptRecord{},
 	}
 }
 
@@ -155,9 +159,11 @@ func (s *Service) Login(ctx context.Context, username, password, clientKey strin
 	if len(username) > MaxUsernameLength {
 		return "", store.Session{}, store.User{}, ErrInvalidCredentials
 	}
-	if locked, retryAfter := s.locked(clientKey); locked {
-		return "", store.Session{}, store.User{}, fmt.Errorf("%w (about %s)", ErrTooManyAttempts, retryAfter.Round(time.Minute))
+	if err := s.admitAttempt(clientKey); err != nil {
+		return "", store.Session{}, store.User{}, err
 	}
+	succeeded := false
+	defer func() { s.finishAttempt(clientKey, succeeded) }()
 
 	user, err := s.store.GetUserByUsername(ctx, username)
 	if errors.Is(err, store.ErrUserNotFound) {
@@ -166,8 +172,8 @@ func (s *Service) Login(ctx context.Context, username, password, clientKey strin
 		if slotErr := s.withHashingSlot(ctx, func() error {
 			_, hashErr := HashPassword("placeholder-for-constant-work")
 			return hashErr
-		}); errors.Is(slotErr, ErrBusy) {
-			return "", store.Session{}, store.User{}, ErrBusy
+		}); slotErr != nil {
+			return "", store.Session{}, store.User{}, slotErr
 		}
 		s.recordFailure(clientKey)
 		return "", store.Session{}, store.User{}, ErrInvalidCredentials
@@ -179,7 +185,7 @@ func (s *Service) Login(ctx context.Context, username, password, clientKey strin
 	var valid bool
 	if err := s.withHashingSlot(ctx, func() error {
 		var verifyErr error
-		valid, verifyErr = VerifyPassword(user.PasswordHash, password)
+		valid, verifyErr = s.verifyPassword(user.PasswordHash, password)
 		return verifyErr
 	}); err != nil {
 		return "", store.Session{}, store.User{}, err
@@ -188,16 +194,19 @@ func (s *Service) Login(ctx context.Context, username, password, clientKey strin
 		s.recordFailure(clientKey)
 		return "", store.Session{}, store.User{}, ErrInvalidCredentials
 	}
-	s.clearFailures(clientKey)
 
-	token, session, err := s.newSession(ctx, user.ID)
+	token, session, err := s.newSession(ctx, user)
+	if errors.Is(err, store.ErrCredentialsChanged) {
+		return "", store.Session{}, store.User{}, ErrInvalidCredentials
+	}
 	if err != nil {
 		return "", store.Session{}, store.User{}, err
 	}
+	succeeded = true
 	return token, session, user, nil
 }
 
-func (s *Service) newSession(ctx context.Context, userID int64) (string, store.Session, error) {
+func (s *Service) newSession(ctx context.Context, user store.User) (string, store.Session, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", store.Session{}, err
@@ -209,12 +218,12 @@ func (s *Service) newSession(ctx context.Context, userID int64) (string, store.S
 	now := time.Now().UTC()
 	session := store.Session{
 		TokenHash: HashToken(token),
-		UserID:    userID,
+		UserID:    user.ID,
 		CSRFToken: csrfToken,
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.lifetime),
 	}
-	if err := s.store.CreateSession(ctx, session); err != nil {
+	if err := s.store.CreateSession(ctx, session, user.PasswordHash); err != nil {
 		return "", store.Session{}, err
 	}
 	return token, session, nil
@@ -244,7 +253,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, currentPassw
 	var valid bool
 	if err := s.withHashingSlot(ctx, func() error {
 		var verifyErr error
-		valid, verifyErr = VerifyPassword(user.PasswordHash, currentPassword)
+		valid, verifyErr = s.verifyPassword(user.PasswordHash, currentPassword)
 		return verifyErr
 	}); err != nil {
 		return err
@@ -264,10 +273,11 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, currentPassw
 	}); err != nil {
 		return err
 	}
-	if err := s.store.UpdateUserPassword(ctx, userID, hash, false); err != nil {
-		return err
+	err = s.store.UpdateUserPassword(ctx, userID, user.PasswordHash, hash, false)
+	if errors.Is(err, store.ErrCredentialsChanged) {
+		return ErrInvalidCredentials
 	}
-	return s.store.DeleteSessionsForUser(ctx, userID)
+	return err
 }
 
 // PurgeExpiredSessions is called periodically by the maintenance loop.
@@ -275,30 +285,48 @@ func (s *Service) PurgeExpiredSessions(ctx context.Context) (int64, error) {
 	return s.store.DeleteExpiredSessions(ctx, time.Now().UTC())
 }
 
-func (s *Service) locked(clientKey string) (bool, time.Duration) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	record, known := s.attempts[clientKey]
-	if !known {
-		return false, 0
-	}
-	remaining := time.Until(record.lockedUntil)
-	if remaining <= 0 {
-		return false, 0
-	}
-	return true, remaining
-}
-
-func (s *Service) recordFailure(clientKey string) {
+// admitAttempt reserves a bounded record before database lookup or hashing.
+// One request owns each key until its result is recorded. Saturation rejects
+// unseen keys instead of evicting useful failure history or active lockouts.
+func (s *Service) admitAttempt(clientKey string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	now := time.Now()
-	s.evictStaleAttempts(now)
+	if record, known := s.attempts[clientKey]; known {
+		if record.inFlight || now.Before(record.lockedUntil) {
+			return ErrTooManyAttempts
+		}
+		if record.staleAt(now) {
+			record.count = 0
+			record.firstFailed = now
+			record.lockedUntil = time.Time{}
+		}
+		record.inFlight = true
+		return nil
+	}
+	if len(s.attempts) >= maxTrackedClients {
+		s.evictStaleAttempts(now)
+	}
+	if len(s.attempts) >= maxTrackedClients {
+		return ErrTooManyAttempts
+	}
+	s.attempts[clientKey] = &attemptRecord{firstFailed: now, inFlight: true}
+	return nil
+}
 
+// recordFailure only updates an admitted key; it can never allocate overflow
+// state, and the reservation remains owned until Login returns.
+func (s *Service) recordFailure(clientKey string) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
 	record, known := s.attempts[clientKey]
-	if !known || now.Sub(record.firstFailed) > loginWindow {
-		s.attempts[clientKey] = &attemptRecord{count: 1, firstFailed: now}
+	if !known || !record.inFlight {
 		return
+	}
+	now := time.Now()
+	if record.count == 0 || now.Sub(record.firstFailed) >= loginWindow {
+		record.count = 0
+		record.firstFailed = now
 	}
 	record.count++
 	if record.count >= maxLoginAttempts {
@@ -308,31 +336,28 @@ func (s *Service) recordFailure(clientKey string) {
 	}
 }
 
-func (s *Service) clearFailures(clientKey string) {
+// Every admitted exit releases ownership, including busy hashing queues,
+// cancellation and database/verifier errors. Only real credential failures are
+// counted. Successful sign-in clears its history without opening an admission
+// gap before the guarded session insertion has finished.
+func (s *Service) finishAttempt(clientKey string, success bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	delete(s.attempts, clientKey)
+	record, known := s.attempts[clientKey]
+	if !known {
+		return
+	}
+	record.inFlight = false
+	if success || (record.count == 0 && !time.Now().Before(record.lockedUntil)) {
+		delete(s.attempts, clientKey)
+	}
 }
 
-// evictStaleAttempts keeps the throttle map bounded. Records past both their
-// window and their lockout carry no information, and if the map is still at its
-// cap afterwards the oldest remaining entries go too — a locked-out attacker
-// cannot flush their own lockout, because locked records are evicted last.
-// Callers must hold the mutex.
+// Callers hold mutex. Only expired, unreserved records are reclaimed. A full
+// sweep examines at most maxTrackedClients records and only runs at capacity.
 func (s *Service) evictStaleAttempts(now time.Time) {
 	for key, record := range s.attempts {
 		if record.staleAt(now) {
-			delete(s.attempts, key)
-		}
-	}
-	if len(s.attempts) < maxTrackedClients {
-		return
-	}
-	for key, record := range s.attempts {
-		if len(s.attempts) < maxTrackedClients {
-			return
-		}
-		if now.After(record.lockedUntil) {
 			delete(s.attempts, key)
 		}
 	}
