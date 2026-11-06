@@ -1532,6 +1532,12 @@ the patched compiler. This compiler update changes no database schema or configu
 
 ## Versions and upgrading
 
+The versioned reference for this release is `ghcr.io/aiulian25/endlessh-dashboard:1.5.0`:
+
+```yaml
+image: ghcr.io/aiulian25/endlessh-dashboard:1.5.0
+```
+
 The quick start references `ghcr.io/aiulian25/endlessh-dashboard:latest`, a mutable tag. Verify
 its platform manifest and compiler provenance before deployment; this checkout's CI builds and
 tests an image but contains no release-publishing workflow. A version-looking tag is not proof of
