@@ -1,3 +1,8 @@
+import { updateWithFocus } from './focus.js';
+import { attackerHash } from './navigation.js';
+import { latestRequests, isAbortError } from './requests.js';
+import { activityNote, CUMULATIVE_NOTE, CONNECTION_TIME_NOTE } from './metric-notes.js';
+import { rangeParams } from './time-range.js';
 /* Machines page: registry table, add/edit/delete dialogs, and a per-machine drill-down. */
 
 import {
@@ -90,7 +95,7 @@ function formMarkup(machine) {
         <label class="switch"><input type="checkbox" id="mf-enabled" ${enabled ? 'checked' : ''}> Scrape this machine</label>
       </div>
     </div>
-    <p class="probe-result" data-probe-result hidden></p>
+    <p class="probe-result" data-probe-result role="status" aria-live="polite" hidden></p>
     <p class="form-error" data-form-error hidden></p>`;
 }
 
@@ -173,8 +178,10 @@ async function testConnection(form, button) {
 
   try {
     const probe = await api('/machines/test', { method: 'POST', body: readForm(form) });
-    result.className = 'probe-result ok';
-    result.textContent = probe.message;
+    const positive = probe.endlessh_evidence === 'compatible';
+    result.className = `probe-result ${positive ? 'ok' : 'inconclusive'}`;
+    const families = (probe.metric_families || []).map(family => `${family.name} (${family.type}, ${family.samples} samples)`);
+    result.textContent = probe.message + (families.length ? ` Families: ${families.join('; ')}.` : '');
   } catch (error) {
     if (error.status === 401) return;
     result.className = 'probe-result bad';
@@ -228,6 +235,7 @@ function machineRow(machine) {
       <td>${statusDot(machine.status)} ${statusBadge(machine.status)}</td>
       <td class="mono num">${esc(fmtNumber(machine.trapped_now))}</td>
       <td><span title="${esc(fmtDateTime(machine.last_scrape_at))}">${esc(fmtRelative(machine.last_scrape_at))}</span></td>
+      <td><span title="${esc(fmtDateTime(machine.last_ok_at))}">${esc(fmtRelative(machine.last_ok_at))}</span></td>
       <td>
         <span class="row-actions">
           <button type="button" class="row-btn" data-edit="${machine.id}" aria-label="Edit ${esc(machine.name)}">${icon('pencil', 15)}</button>
@@ -237,12 +245,14 @@ function machineRow(machine) {
     </tr>`;
 }
 
-async function renderList(mount) {
+async function renderList(mount, routeSignal) {
+  const requests = latestRequests(routeSignal);
   mount.innerHTML = `
     <div class="page-head">
       <h1 class="page-title">Machines</h1>
       <button type="button" class="btn btn-primary" id="add-machine">${icon('plus', 16)} Add machine</button>
     </div>
+    <p class="filters-note" id="machines-metric-note"></p>
     <div class="card" id="machines-card">
       <div class="card-pad"><div class="skeleton w60"></div></div>
     </div>`;
@@ -254,7 +264,8 @@ async function renderList(mount) {
   // loaded it, so fetching again would only repeat an answered request.
   const load = async () => {
     try {
-      paint(currentMachines());
+      if (requests.signal.aborted) return;
+      updateWithFocus(card, () => paint(currentMachines()), requests.signal);
     } catch (error) {
       if (error.status === 401) return;
       renderError(card, error, load);
@@ -267,12 +278,14 @@ async function renderList(mount) {
     try {
       await loadMachines();
     } catch (error) {
-      if (error.status !== 401) toast(error.message, 'error');
+      if (!requests.signal.aborted && !isAbortError(error) && error.status !== 401) toast(error.message, 'error');
     }
+    if (requests.signal.aborted) return;
     await load();
   };
 
   const paint = (machines) => {
+    mount.querySelector('#machines-metric-note').textContent = `${activityNote(machines[0]?.activity_threshold_seconds)} Counts are distinct IPs per machine; an IP can appear on several machines. Health becomes stale after the same threshold without success; disabled and never-scraped machines are separate. Dates use UTC.`;
     if (!machines.length) {
       card.innerHTML = emptyState({
         title: 'No machines registered yet',
@@ -292,8 +305,9 @@ async function renderList(mount) {
             <th scope="col">Metrics path</th>
             <th scope="col">Group</th>
             <th scope="col">Status</th>
-            <th scope="col" class="num">Trapped now</th>
-            <th scope="col">Last scrape</th>
+            <th scope="col" class="num">Recently active IPs</th>
+            <th scope="col">Last attempt</th>
+            <th scope="col">Last successful scrape</th>
             <th scope="col"><span class="sr-only">Actions</span></th>
           </tr></thead>
           <tbody>${machines.map(machineRow).join('')}</tbody>
@@ -328,20 +342,25 @@ async function renderList(mount) {
   };
 
   mount.querySelector('#add-machine').addEventListener('click', () => machineDialog(null, reload));
-  onRefresh(load);
+  onRefresh(load, requests.signal);
   await load();
 }
 
 /* ---------------- drill-down ---------------- */
 
-async function renderDetail(mount, id) {
+async function renderDetail(mount, id, routeSignal) {
+  const requests = latestRequests(routeSignal);
   mount.innerHTML = `
+    <h1 class="sr-only">Machine details</h1>
     <div class="page-head">
       <a href="#/machines" class="btn btn-ghost btn-sm">${icon('chevronLeft', 14)} All machines</a>
     </div>
     <div class="card card-pad"><div class="skeleton w40"></div></div>`;
 
   const load = async () => {
+    const request = requests.begin();
+    if (!request.isCurrent()) return;
+    const windowValue = getWindow();
     try {
       const machine = currentMachines().find((entry) => entry.id === id);
       if (!machine) {
@@ -354,12 +373,15 @@ async function renderDetail(mount, id) {
         return;
       }
 
-      const params = { machines: String(id), window: getWindow() };
+      const params = { machines: String(id), ...rangeParams(windowValue) };
       const [timeseries, attackers] = await Promise.all([
-        api('/timeseries' + qs(params)),
-        api('/attackers' + qs({ ...params, sort: 'trapped_seconds', order: 'desc', page: 1, per_page: DRILL_ROWS })),
+        api('/timeseries' + qs(params), { signal: request.signal }),
+        api('/attackers' + qs({ ...params, sort: 'trapped_seconds', order: 'desc', page: 1, per_page: DRILL_ROWS }), { signal: request.signal }),
       ]);
 
+      if (!request.isCurrent()) return;
+      updateWithFocus(mount, () => {
+      if (!request.isCurrent()) return;
       mount.innerHTML = `
         <div class="page-head">
           <a href="#/machines" class="btn btn-ghost btn-sm">${icon('chevronLeft', 14)} All machines</a>
@@ -369,16 +391,18 @@ async function renderDetail(mount, id) {
           ${statusBadge(machine.status)}
           <span class="page-sub mono">${esc(machine.host)}:${esc(machine.port)}${esc(machine.metrics_path)}</span>
         </div>
+        ${machine.target_changed_at ? `<p class="page-sub">Endpoint changed ${esc(fmtDateTime(machine.target_changed_at))}. Counters were rebaselined; earlier history is preserved.</p>` : ''}
         ${machine.last_error ? `<div class="alert" role="status">${icon('alert', 18)}<span>${esc(machine.last_error)}</span></div>` : ''}
+        <p class="filters-note">${esc(activityNote(machine.activity_threshold_seconds))} Last successful scrape: ${esc(fmtRelative(machine.last_ok_at))}; dates use UTC. ${esc(CONNECTION_TIME_NOTE)}</p>
         <div class="grid-stats">
-          <div class="card stat"><span class="stat-label">Trapped now</span><span class="stat-value amber">${esc(fmtNumber(machine.trapped_now))}</span><span class="stat-delta neutral">live sessions</span></div>
+          <div class="card stat"><span class="stat-label">Recently active IPs</span><span class="stat-value amber">${esc(fmtNumber(machine.trapped_now))}</span><span class="stat-delta neutral">positive sampled growth</span></div>
           <div class="card stat"><span class="stat-label">Last scrape</span><span class="stat-value">${esc(fmtRelative(machine.last_scrape_at))}</span><span class="stat-delta neutral">${esc(fmtDateTime(machine.last_scrape_at))}</span></div>
           <div class="card stat"><span class="stat-label">Last success</span><span class="stat-value">${esc(fmtRelative(machine.last_ok_at))}</span><span class="stat-delta neutral">${esc(fmtNumber(machine.consecutive_failures))} failures in a row</span></div>
           <div class="card stat"><span class="stat-label">Group</span><span class="stat-value">${esc(machine.group_label || '—')}</span><span class="stat-delta neutral">${machine.enabled ? 'Scraping enabled' : 'Scraping disabled'}</span></div>
         </div>
         <div class="card card-pad">
           <div class="card-head flush">
-            <h2 class="card-title">Attacker time trapped</h2>
+            <h2 class="card-title">Sampled connection time</h2>
             <div class="legend" id="md-legend"></div>
             <div class="seg" id="md-range" role="group" aria-label="Time range"></div>
           </div>
@@ -386,38 +410,41 @@ async function renderDetail(mount, id) {
         </div>
         <div class="card">
           <div class="card-head">
-            <h2 class="card-title">Attackers on this machine</h2>
-            <a href="#/attackers">View all ${esc(fmtNumber(attackers.total))}</a>
+            <h2 class="card-title">Cumulative IP rows on this machine</h2>
+            <a href="${esc(attackerHash({}, String(id), windowValue))}">View all ${esc(fmtNumber(attackers.total))} rows</a>
           </div>
+          <p class="filters-note card-pad">${esc(CUMULATIVE_NOTE)} ${esc(CONNECTION_TIME_NOTE)}</p>
           <div id="md-table"></div>
         </div>`;
 
       renderLegend(mount.querySelector('#md-legend'), timeseries.series || []);
-      renderChart(mount.querySelector('#md-chart'), timeseries, { label: `Attacker time trapped on ${machine.name}`, format: fmtDuration });
+      renderChart(mount.querySelector('#md-chart'), timeseries, { label: `Sampled connection time (connection-seconds) on ${machine.name}`, format: fmtDuration });
       renderAttackersTable(mount.querySelector('#md-table'), attackers.rows || [], { columns: DRILL_COLUMNS });
 
       const rangeHost = mount.querySelector('#md-range');
       rangeHost.innerHTML = WINDOWS.map((value) => `
-        <button type="button" data-window="${value}" aria-pressed="${value === getWindow()}">${value}</button>`).join('');
+        <button type="button" data-window="${value}" aria-pressed="${value === windowValue}">${value}</button>`).join('');
       rangeHost.querySelectorAll('[data-window]').forEach((button) => {
         button.addEventListener('click', () => {
           setWindow(button.dataset.window);
           load();
         });
       });
+      }, requests.signal);
     } catch (error) {
+      if (!request.isCurrent() || isAbortError(error)) return;
       if (error.status === 401) return;
       mount.innerHTML = '';
       renderError(mount, error, load);
     }
   };
 
-  onRefresh(load);
+  onRefresh(load, requests.signal);
   await load();
 }
 
-export async function render(mount, param) {
+export async function render(mount, param, routeSignal) {
   const id = Number(param);
-  if (Number.isFinite(id) && param) await renderDetail(mount, id);
-  else await renderList(mount);
+  if (Number.isFinite(id) && param) await renderDetail(mount, id, routeSignal);
+  else await renderList(mount, routeSignal);
 }

@@ -764,6 +764,7 @@ a.row-btn { text-decoration: none; }
   width: 320px;
   max-width: 100%;
 }
+.search:focus-within { outline: 2px solid var(--primary); outline-offset: 2px; }
 .search svg { color: var(--muted); flex: none; }
 .search input {
   border: 0;
@@ -1112,6 +1113,7 @@ a.row-btn { text-decoration: none; }
   font-size: 13px;
 }
 .probe-result.ok { border-color: var(--ok); color: var(--ink); }
+.probe-result.inconclusive { border-color: var(--amber); color: var(--ink); }
 .probe-result.bad { border-color: var(--danger); color: var(--danger-ink); }
 
 .modal-foot {
@@ -1262,3 +1264,22 @@ a.row-btn { text-decoration: none; }
   }
   .skeleton { background: var(--card-2); }
 }
+
+/* Activity labels can be longer than legacy session claims on narrow screens. */
+.activity-badge { white-space: normal; max-width: 18rem; line-height: 1.35; }
+.metric-details { margin: 8px 0 12px; color: var(--muted); font-size: 13px; }
+.metric-details summary { cursor: pointer; }
+.metric-details p { margin: 8px 0; }
+
+/* Coverage is independent of zero values; neutral shading retains known data. */
+.coverage-gap { fill: var(--muted); fill-opacity: .16; stroke: var(--muted); stroke-opacity: .35; stroke-dasharray: 2 4; vector-effect: non-scaling-stroke; }
+.spark-gap { fill: var(--muted); fill-opacity: .14; stroke: var(--muted); stroke-width: .4; stroke-dasharray: 1 2; }
+.chart-coverage-note { color: var(--muted); font-size: 11px; max-width: 28rem; white-space: normal; overflow-wrap: anywhere; margin-bottom: 5px; }
+
+/* Refresh health is textual as well as colored; retained data stays readable. */
+.panel-state { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; margin: 7px 0; color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.panel-state.is-stale { color: var(--danger-ink); border-left: 2px solid var(--danger-border); padding-left: 8px; }
+.panel-retry { font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--border); border-radius: var(--r-control); padding: 3px 7px; cursor: pointer; white-space: nowrap; }
+.panel-retry:hover { background: var(--card-2); }
+.panel-retry:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.side-refresh-state { padding: 0 12px; }

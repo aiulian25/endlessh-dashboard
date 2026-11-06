@@ -1,3 +1,4 @@
+import { latestRequests, isAbortError } from './requests.js';
 /* Backups: list, create, download, upload, restore and delete database
    snapshots. Rendered as a card inside Settings rather than as a page of its
    own — backing up is something you set up once and then leave alone, which
@@ -36,7 +37,8 @@ function backupRow(backup) {
 
 // renderBackups fills the host element with the whole backups section. It owns
 // its own loading, so the caller only has to give it somewhere to live.
-export async function renderBackups(host) {
+export async function renderBackups(host, routeSignal) {
+  const requests = latestRequests(routeSignal);
   host.innerHTML = `
     <div class="card" id="backups-card">
       <div class="card-head">
@@ -60,9 +62,14 @@ export async function renderBackups(host) {
   const fileInput = mount.querySelector('#backup-file');
 
   const load = async () => {
+    const request = requests.begin();
+    if (!request.isCurrent()) return;
     try {
-      paint(await api('/backups') || []);
+      const data = await api('/backups', { signal: request.signal });
+      if (!request.isCurrent()) return;
+      paint(data || []);
     } catch (error) {
+      if (!request.isCurrent() || isAbortError(error)) return;
       if (error.status === 401) return;
       renderError(card, error, load);
     }
@@ -201,6 +208,6 @@ export async function renderBackups(host) {
     if (file) uploadBackup(file);
   });
 
-  onRefresh(load);
+  onRefresh(load, requests.signal);
   await load();
 }

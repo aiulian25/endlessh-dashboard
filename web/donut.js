@@ -1,3 +1,4 @@
+import { countrySummaryLabel } from './country.js';
 /* "Attacks by country" donut for the /api/geo/countries payload. */
 
 import { esc, fmtNumber, paletteClass, PALETTE_SIZE } from './app.js';
@@ -15,7 +16,7 @@ const OTHER_LABEL = 'Other';
 const UNKNOWN_COUNTRY = 'Unknown';
 
 function countryName(entry) {
-  return entry.country || entry.country_code || UNKNOWN_COUNTRY;
+  return countrySummaryLabel(entry) || UNKNOWN_COUNTRY;
 }
 
 function connectionsOf(entry) {
@@ -85,7 +86,7 @@ export function renderDonut(host, countries) {
       <span class="lg-pct mono">${esc(percent(segment.value, total))}%</span>
     </div>`).join('');
 
-  const summary = `Share of connections by country: ${fmtNumber(rows.length)} ${countryWord(rows.length)}, ${fmtNumber(total)} connections`;
+  const summary = `Share of retained cumulative connections among known-country rows in range: ${fmtNumber(rows.length)} ${countryWord(rows.length)}, ${fmtNumber(total)} cumulative connections`;
 
   const srRows = segments.map((segment) => `
     <tr>
@@ -107,7 +108,7 @@ export function renderDonut(host, countries) {
         <thead>
           <tr>
             <th scope="col">Country</th>
-            <th scope="col">Connections</th>
+            <th scope="col">Cumulative connections</th>
             <th scope="col">Share</th>
           </tr>
         </thead>

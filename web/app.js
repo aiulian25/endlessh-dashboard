@@ -1,3 +1,7 @@
+import { updateWithFocus, focusHeading } from './focus.js';
+import { attackerState, attackerHash } from './navigation.js';
+import { panelState } from './panel-state.js';
+import { latestRequests, isAbortError, serializedRefresh } from './requests.js';
 /* Endlessh Dashboard — shell, router, session, shared helpers. */
 
 export const API_BASE = 'api';
@@ -13,6 +17,8 @@ export const THEME_SYSTEM = 'system';
 
 const STATUS_OK = 'ok';
 const STATUS_DEGRADED = 'degraded';
+const STATUS_STALE = 'stale';
+const STATUS_NEVER = 'never_scraped';
 export const STATUS_DOWN = 'down';
 export const STATUS_DISABLED = 'disabled';
 
@@ -143,7 +149,7 @@ export function fmtDateTime(timestamp) {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short',
   });
 }
 
@@ -164,14 +170,17 @@ class ApiError extends Error {
 }
 
 let session = null;
+let loggingOut = false;
 
 export function getSession() {
   return session;
 }
 
 export async function api(path, options = {}) {
-  const { method = 'GET', body, allowAuthRedirect = true } = options;
-  const init = { method, credentials: 'same-origin', headers: {} };
+  const { method = 'GET', body, allowAuthRedirect = true, signal } = options;
+  const init = { method, signal, credentials: 'same-origin', headers: {} };
+  signal?.throwIfAborted();
+  const requestSession = session;
 
   // A FormData body goes as it is, with no Content-Type of ours: only the
   // browser knows the multipart boundary it has to name in that header.
@@ -189,11 +198,14 @@ export async function api(path, options = {}) {
   try {
     response = await fetch(API_BASE + path, init);
   } catch (cause) {
+    signal?.throwIfAborted();
+    if (isAbortError(cause)) throw cause;
     throw new ApiError('Cannot reach the dashboard server.', 0);
   }
 
+  signal?.throwIfAborted();
   if (response.status === 401) {
-    if (allowAuthRedirect) showLogin();
+    if (allowAuthRedirect && requestSession === session) showLogin();
     throw new ApiError('Your session has expired. Please sign in again.', 401);
   }
   if (response.status === 204) return null;
@@ -201,6 +213,7 @@ export async function api(path, options = {}) {
   const isJson = (response.headers.get('Content-Type') || '').includes('json');
   const payload = isJson ? await response.json().catch(() => null) : null;
 
+  signal?.throwIfAborted();
   if (!response.ok) {
     const message = (payload && payload.error) || `Request failed (${response.status})`;
     throw new ApiError(message, response.status);
@@ -322,6 +335,8 @@ export function statusBadge(status) {
   const map = {
     [STATUS_OK]: ['badge-ok', 'Healthy'],
     [STATUS_DEGRADED]: ['badge-warn', 'Degraded'],
+    [STATUS_STALE]: ['badge-warn', 'Stale'],
+    [STATUS_NEVER]: ['', 'No successful scrape'],
     [STATUS_DOWN]: ['badge-danger', 'Down'],
     [STATUS_DISABLED]: ['', 'Disabled'],
   };
@@ -333,6 +348,8 @@ export function statusDot(status) {
   const map = {
     [STATUS_OK]: 'dot-ok',
     [STATUS_DEGRADED]: 'dot-amber',
+    [STATUS_STALE]: 'dot-amber',
+    [STATUS_NEVER]: 'dot-muted',
     [STATUS_DOWN]: 'dot-danger',
     [STATUS_DISABLED]: 'dot-muted',
   };
@@ -454,7 +471,7 @@ function effectiveSelection() {
 }
 
 // How "nothing is ticked" survives a query string. An empty machines= reads as
-// "not specified" and reports on every machine, which is the opposite, so the
+// "not specified" and reports on enabled machines, which is the opposite, so the
 // deselected-everything case has to send an id instead — one no machine can
 // hold. Machine ids come from SQLite AUTOINCREMENT and start at 1, which is the
 // whole reason 0 matches nothing. resolveMachines in internal/api/server.go
@@ -462,8 +479,8 @@ function effectiveSelection() {
 const NO_MACHINES = '0';
 
 export function machinesParam() {
-  if (selected === null) return '';
-  return selected.length ? selected.join(',') : NO_MACHINES;
+  const ids = effectiveSelection();
+  return ids.length ? ids.join(',') : NO_MACHINES;
 }
 
 // machineColour is the palette class a machine is drawn in, everywhere: the chart only
@@ -500,18 +517,35 @@ export function currentMachines() {
   return machines;
 }
 
+const machineRequests = latestRequests();
+let machineState = null;
+export function machineListKnown() { return Boolean(machineState?.hasValue && !machineState.failed); }
 export async function loadMachines() {
-  machines = await api('/machines');
-  if (selected !== null) {
-    const known = new Set(machines.map((machine) => machine.id));
-    const pruned = selected.filter((id) => known.has(id));
-    if (pruned.length !== selected.length) {
-      selected = pruned;
-      writeSelected();
-    }
+  if (!session || loggingOut) return machines;
+  if (!machineState) {
+    const host = document.createElement('div');
+    host.id = 'side-refresh-state'; host.className = 'side-refresh-state';
+    document.getElementById('side-list').before(host);
+    machineState = panelState(host, 'machines', () => runRefresh());
   }
-  renderSidebar();
-  return machines;
+  const request = machineRequests.begin();
+  machineState.start('registered machines');
+  try {
+    const loaded = await api('/machines', { signal: request.signal });
+    if (!request.isCurrent() || !session) return machines;
+    machines = loaded;
+    machineState.success(loaded, 'registered machines');
+    if (selected !== null) {
+      const known = new Set(machines.map((machine) => machine.id));
+      const pruned = selected.filter((id) => known.has(id));
+      if (pruned.length !== selected.length) { selected = pruned; writeSelected(); }
+    }
+    renderSidebar();
+    return machines;
+  } catch (error) {
+    if (request.isCurrent() && !isAbortError(error) && error.status !== 401) machineState.failure(error, 'registered machines');
+    throw error;
+  }
 }
 
 /* ---------------- sidebar ---------------- */
@@ -535,7 +569,7 @@ function activityValues(machine) {
 }
 
 // sparkline scales each machine against its own peak so a quiet machine still
-// shows its shape, and falls back to a flat faint row when nothing happened.
+// shows its shape; unknown or incomplete observations are shaded.
 function sparkline(machine, index) {
   const values = activityValues(machine);
   const peak = Math.max(...values);
@@ -546,7 +580,9 @@ function sparkline(machine, index) {
     const fraction = Math.max(SPARK_FLOOR, scaled);
     const height = fraction * SPARK_HEIGHT;
     const opacity = SPARK_MIN_OPACITY + SPARK_OPACITY_RANGE * scaled;
-    return `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="${(SPARK_HEIGHT - height).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${height.toFixed(2)}" rx="1" fill="currentColor" fill-opacity="${opacity.toFixed(2)}"></rect>`;
+    if (machine.activity_coverage?.[bucket] !== 'complete' && value === 0) return `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="0" width="${barWidth.toFixed(2)}" height="${SPARK_HEIGHT}" class="spark-gap"></rect>`;
+    const gap = machine.activity_coverage?.[bucket] !== 'complete' ? `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="0" width="${barWidth.toFixed(2)}" height="${SPARK_HEIGHT}" class="spark-gap"></rect>` : '';
+    return gap + `<rect x="${(bucket * (barWidth + SPARK_GAP)).toFixed(2)}" y="${(SPARK_HEIGHT - height).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${height.toFixed(2)}" rx="1" fill="currentColor" fill-opacity="${opacity.toFixed(2)}"></rect>`;
   }).join('');
 
   // The same palette class the chart and the map use, keyed to the machine
@@ -564,6 +600,9 @@ function unreachableFor(machine) {
 }
 
 function machineCardBody(machine, index) {
+  if (machine.status === STATUS_STALE || machine.status === STATUS_NEVER) {
+    return `<span class="mcard-note">${machine.status === STATUS_STALE ? 'stale · last success ' + esc(fmtRelative(machine.last_ok_at)) : 'no successful scrape yet'}</span><span class="mcard-note">${machine.last_scrape_at ? 'last attempt ' + esc(fmtRelative(machine.last_scrape_at)) : 'waiting for first attempt'} · retained data kept</span>`;
+  }
   if (machine.status === STATUS_DOWN) {
     return `
       <span class="mcard-bad">${esc(unreachableFor(machine))}</span>
@@ -576,10 +615,10 @@ function machineCardBody(machine, index) {
   return `
     <span class="mcard-count">
       <span class="mcard-num${trapped > 0 ? ' amber' : ''}">${esc(fmtNumber(trapped))}</span>
-      <span>trapped now</span>
+      <span title="Distinct IPs with recent sampled counter growth">recently active IPs</span>
     </span>
     ${sparkline(machine, index)}
-    <span class="mcard-note">scraped ${esc(fmtRelative(machine.last_scrape_at))}</span>`;
+    <span class="mcard-note">success ${esc(fmtRelative(machine.last_ok_at))} · gaps shaded</span>`;
 }
 
 function machineCard(machine, index) {
@@ -590,7 +629,7 @@ function machineCard(machine, index) {
           aria-label="Reorder ${esc(machine.name)}. Drag, or press the up and down arrow keys."
           title="Drag to reorder">${icon('grip', 14)}</button>
         <input type="checkbox" class="mcard-check" value="${machine.id}"
-          aria-label="Include ${esc(machine.name)} in the dashboard"
+          aria-label="Include ${esc(machine.name)} in the dashboard${machine.enabled ? '' : ' (disabled history)'}"
           ${effectiveSelection().includes(machine.id) ? 'checked' : ''}>
         ${statusDot(machine.status)}
         <a class="mcard-link" href="#/machines/${machine.id}">${esc(machine.name)}</a>
@@ -616,6 +655,7 @@ function renderSidebar() {
   const list = document.getElementById('side-list');
   if (!list) return;
 
+  return updateWithFocus(list, () => {
   paintSelectionSummary();
 
   if (!machines.length) {
@@ -637,6 +677,7 @@ function renderSidebar() {
   });
 
   wireReordering(list);
+  });
 }
 
 // Redraw after a reorder and put the keyboard back where it was. Without this
@@ -752,28 +793,33 @@ const refreshers = new Set();
 let refreshTimer = null;
 let refreshSeconds = DEFAULT_REFRESH_SECONDS;
 
-export function onRefresh(callback) {
+export function onRefresh(callback, signal = currentView?.signal) {
+  if (signal?.aborted) return () => {};
   refreshers.add(callback);
-  return () => refreshers.delete(callback);
+  const remove = () => { refreshers.delete(callback); signal?.removeEventListener('abort', remove); };
+  signal?.addEventListener('abort', remove, { once: true });
+  return remove;
 }
 
-async function runRefresh() {
-  if (document.hidden) return;
-  // No session means the login screen is showing; refreshing would only bounce
-  // an unauthenticated request and reset whatever the user is typing.
-  if (!session) return;
-  // Refresh redraws whole subtrees, which would drop focus and any half-typed
-  // value, so a user who is actively using a control keeps what they have.
-  if (isUserBusy()) return;
-  // Awaited, so the views that follow read a list that is already current and
-  // ask for it none more times between them.
-  await loadMachines().catch(() => {});
-  refreshers.forEach((callback) => {
-    try {
-      callback();
-    } catch (error) {
-      /* a failing page refresh must not stop the others */
-    }
+const refreshRound = serializedRefresh();
+function runRefresh() {
+  return refreshRound(async () => {
+    if (document.hidden) return;
+    // No session means the login screen is showing; refreshing would only bounce
+    // an unauthenticated request and reset whatever the user is typing.
+    if (!session || loggingOut) return;
+    // Refresh redraws whole subtrees, which would drop focus and any half-typed
+    // value, so a user who is actively using a control keeps what they have.
+    if (isUserBusy()) return;
+    // Awaited, so the views that follow read a list that is already current and
+    // ask for it none more times between them.
+    const view = currentView;
+    const callbacks = [...refreshers];
+    await loadMachines().catch(() => {});
+    if (!session || view !== currentView || view?.signal.aborted) return;
+    await Promise.allSettled(callbacks.map((callback) => Promise.resolve().then(() => {
+      if (refreshers.has(callback) && view === currentView && !view?.signal.aborted) return callback();
+    })));
   });
 }
 
@@ -810,7 +856,9 @@ export function navigate(hash) {
 
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, '');
-  const parts = raw.split('/').filter(Boolean);
+  const [path, search = ''] = raw.split('?');
+  const query = new URLSearchParams(search);
+  const parts = path.split('/').filter(Boolean);
   if (parts.length && MOVED_ROUTES[parts[0]]) {
     const moved = MOVED_ROUTES[parts[0]];
     // Rewrite the address rather than only resolving it, so a stale bookmark
@@ -825,7 +873,7 @@ function parseHash() {
     return { name: currentRoute || DEFAULT_ROUTE, param: currentParam };
   }
   const name = PAGES[parts[0]] ? parts[0] : DEFAULT_ROUTE;
-  return { name, param: parts[1] || null };
+  return { name, param: parts[1] || null, query };
 }
 
 // isUserBusy reports whether the person is mid-interaction with a control, in
@@ -842,21 +890,32 @@ function isUserBusy() {
   // A held grip is mid-reorder before any key is pressed. It is a <button>, so
   // it is natively focusable and matches none of the tests below.
   if (active.classList.contains('mcard-grip')) return true;
-  // A focused chart or map bubble is a reading position as much as a half-typed
-  // field is: redrawing under it would drop the keyboard user back to the body.
   return ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName)
-    || active.isContentEditable
-    || active.matches('[tabindex="0"]');
+    || active.isContentEditable;
 }
 
+let currentView = null;
 let currentRoute = null;
 let currentParam = null;
 
-async function renderRoute() {
-  const { name, param } = parseHash();
+async function renderRoute({focus = true} = {}) {
+  currentView?.dispose();
+  refreshers.clear();
+  if (!session || loggingOut) return;
+  const viewScope = latestRequests();
+  currentView = viewScope;
+  const { name, param, query = new URLSearchParams() } = parseHash();
+  if (name === 'attackers') {
+    if (WINDOWS.includes(query.get('window'))) activeWindow = query.get('window');
+    if (query.has('machines')) {
+      const ids = query.get('machines').split(',').filter(id => /^[1-9]\d*$/.test(id)).map(Number).filter(Number.isSafeInteger);
+      const known = new Set(machines.map(machine => machine.id));
+      selected = [...new Set(ids)].filter(id => !machineListKnown() || known.has(id));
+      writeSelected(); renderSidebar();
+    }
+  }
   currentRoute = name;
   currentParam = param;
-  refreshers.clear();
 
   document.querySelectorAll('.nav-link').forEach((link) => {
     if (link.dataset.route === name) link.setAttribute('aria-current', 'page');
@@ -871,9 +930,13 @@ async function renderRoute() {
 
   try {
     const module = await PAGES[name]();
-    if (currentRoute !== name || !mount.isConnected) return;
-    await module.render(mount, param);
+    if (viewScope !== currentView || viewScope.signal.aborted || !mount.isConnected) return;
+    const rendering = module.render(mount, param, viewScope.signal, query);
+    const heading = focus && !isDrawerOpen() ? focusHeading(mount) : null;
+    await rendering;
+    if (heading && !heading.isConnected && viewScope === currentView && !viewScope.signal.aborted && document.activeElement === document.body) focusHeading(mount);
   } catch (error) {
+    if (viewScope !== currentView || viewScope.signal.aborted || isAbortError(error)) return;
     if (error instanceof ApiError && error.status === 401) return;
     renderError(mount, error, () => renderRoute());
   }
@@ -893,6 +956,11 @@ export function signOutAfterPasswordChange() {
 }
 
 function showLogin(message) {
+  setDrawer(false, {restore:false});
+  loggingOut = false;
+  currentView?.dispose();
+  currentView = null;
+  machineRequests.cancel();
   session = null;
   stopRefreshTimer();
   refreshers.clear();
@@ -917,6 +985,7 @@ function showForcedChange() {
 }
 
 async function startApp() {
+  const startingSession = session;
   document.getElementById('boot').hidden = true;
   authRoot().hidden = true;
   appRoot().hidden = false;
@@ -924,12 +993,13 @@ async function startApp() {
   try {
     await loadMachines();
   } catch (error) {
-    if (!(error instanceof ApiError && error.status === 401)) toast(error.message, 'error');
+    if (!isAbortError(error) && session === startingSession && !loggingOut && !(error instanceof ApiError && error.status === 401)) toast(error.message, 'error');
   }
 
+  if (!session || loggingOut || session !== startingSession) return;
   api('/settings')
-    .then((settings) => setRefreshCadence(settings.scrape_interval_seconds))
-    .catch(() => setRefreshCadence(DEFAULT_REFRESH_SECONDS));
+    .then((settings) => { if (session === startingSession && !loggingOut) setRefreshCadence(settings.scrape_interval_seconds); })
+    .catch(() => { if (session === startingSession && !loggingOut) setRefreshCadence(DEFAULT_REFRESH_SECONDS); });
 
   startRefreshTimer();
   renderRoute();
@@ -1022,6 +1092,10 @@ function wireAuthForms() {
 }
 
 async function logout() {
+  loggingOut = true;
+  currentView?.dispose();
+  machineRequests.cancel();
+  stopRefreshTimer();
   try {
     await api('/logout', { method: 'POST', allowAuthRedirect: false });
   } catch (error) {
@@ -1038,10 +1112,23 @@ function isDrawerOpen() {
   return document.getElementById('sidebar').classList.contains(DRAWER_OPEN_CLASS);
 }
 
-function setDrawer(open) {
-  document.getElementById('sidebar').classList.toggle(DRAWER_OPEN_CLASS, open);
+const drawerMedia = window.matchMedia('(max-width: 900px)');
+let drawerReturn = null;
+function setDrawer(open, {restore = true} = {}) {
+  const sidebar = document.getElementById('sidebar');
+  const button = document.getElementById('drawer-btn');
+  const wasOpen = isDrawerOpen();
+  open = Boolean(open && drawerMedia.matches);
+  if (open && !wasOpen) drawerReturn = document.activeElement;
+  sidebar.classList.toggle(DRAWER_OPEN_CLASS, open);
+  sidebar.setAttribute('role', open ? 'dialog' : 'complementary');
+  if (open) sidebar.setAttribute('aria-modal','true'); else sidebar.removeAttribute('aria-modal');
+  document.getElementById('drawer-close').hidden = !open;
   document.getElementById('scrim').hidden = !open;
-  document.getElementById('drawer-btn').setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-expanded', String(open));
+  for (const node of document.querySelectorAll('.topbar,#view,.skip-link')) node.inert = open;
+  if (open && !wasOpen) document.getElementById('drawer-close').focus();
+  else if (wasOpen && restore && drawerMedia.matches) (drawerReturn?.isConnected ? drawerReturn : button).focus({preventScroll:true});
 }
 
 function wireSidebar() {
@@ -1049,14 +1136,30 @@ function wireSidebar() {
   drawerButton.innerHTML = icon('server', 16);
   drawerButton.addEventListener('click', () => setDrawer(!isDrawerOpen()));
 
+  document.getElementById('drawer-close').addEventListener('click', () => setDrawer(false));
+  drawerMedia.addEventListener('change', () => {
+    const closeFocused = document.activeElement === document.getElementById('drawer-close');
+    setDrawer(false, {restore:drawerMedia.matches});
+    if (closeFocused && !drawerMedia.matches) document.getElementById('side-all').focus();
+  });
+
   document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
   document.getElementById('side-all').addEventListener('click', () => setEveryCheckbox(true));
   document.getElementById('side-none').addEventListener('click', () => setEveryCheckbox(false));
 
   document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape' || !isDrawerOpen()) return;
-    setDrawer(false);
-    drawerButton.focus();
+    if (!isDrawerOpen() || !drawerMedia.matches) return;
+    if (event.key === 'Escape') { event.preventDefault(); setDrawer(false); return; }
+    if (event.key !== 'Tab') return;
+    const sidebar = document.getElementById('sidebar');
+    const controls = [...sidebar.querySelectorAll('button,a[href],input,select,textarea,[tabindex="0"]')]
+      .filter(node => !node.disabled && node.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (event.shiftKey && (document.activeElement === first || !sidebar.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !sidebar.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+  });
+  document.addEventListener('focusin', event => {
+    if (isDrawerOpen() && drawerMedia.matches && !document.getElementById('sidebar').contains(event.target)) document.getElementById('drawer-close').focus();
   });
 }
 
@@ -1081,10 +1184,20 @@ function init() {
   });
 
   window.addEventListener('hashchange', () => {
-    setDrawer(false);
+    setDrawer(false, {restore:false});
     renderRoute();
   });
-  document.addEventListener('machines-changed', () => renderRoute());
+  document.addEventListener('machines-changed', () => {
+    if (parseHash().name === 'attackers') {
+      const query = parseHash().query;
+      const state = attackerState(query);
+      const previous = (query?.get('machines') || '0').split(',').sort().join(',');
+      const next = machinesParam().split(',').sort().join(',');
+      if (previous !== next) state.page = 1;
+      history.replaceState(history.state,'',attackerHash(state,machinesParam(),getWindow()));
+    }
+    renderRoute({focus:false});
+  });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) runRefresh();
   });

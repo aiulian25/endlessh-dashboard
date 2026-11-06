@@ -1,9 +1,16 @@
+import { updateWithFocus } from './focus.js';
+import { attackerState, rememberAttackers } from './navigation.js';
+import { panelState } from './panel-state.js';
+import { latestRequests, isAbortError } from './requests.js';
+import { countrySummaryLabel } from './country.js';
+import { activityLabel, activityNote, scrapeNote, CUMULATIVE_NOTE, CONNECTION_TIME_NOTE } from './metric-notes.js';
+import { rangeParams } from './time-range.js';
 /* Attackers page plus the shared attackers-table renderer. */
 
 import {
-  api, qs, esc, icon, onRefresh, renderError, emptyState,
+  api, qs, esc, icon, onRefresh, emptyState,
   fmtDuration, fmtNumber, fmtRelative, fmtDateTime,
-  machinesParam, getWindow, ATTACKER_TRAPPED,
+  machinesParam, getWindow, currentMachines, ATTACKER_TRAPPED,
 } from './app.js';
 
 const PER_PAGE = 50;
@@ -17,8 +24,9 @@ const SORT_CONNECTIONS = 'connections';
 
 const STATUS_FILTERS = [
   { value: '', label: 'Status: all' },
-  { value: 'trapped', label: 'Status: trapped' },
-  { value: 'gave_up', label: 'Status: gave up' },
+  { value: 'trapped', label: 'Status: recently active' },
+  { value: 'gave_up', label: 'Status: no recent measured activity' },
+  { value: 'unknown', label: 'Status: activity time unknown' },
 ];
 
 // Only ever the ISO code. The badge is a fixed-width chip, and a tarpit's own
@@ -31,8 +39,7 @@ function countryBadgeText(row) {
 }
 
 function statusCell(row) {
-  const trapped = row.status === ATTACKER_TRAPPED;
-  return `<span class="badge ${trapped ? 'badge-danger' : ''}">${trapped ? 'Trapped' : 'Gave up'}</span>`;
+  return `<span class="badge activity-badge ${row.status === ATTACKER_TRAPPED ? 'badge-warn' : ''}">${esc(activityLabel(row.status))}</span>`;
 }
 
 const COLUMNS = {
@@ -61,10 +68,11 @@ const COLUMNS = {
     cell: (row) => esc(row.isp),
   },
   machine: { label: 'Machine', cell: (row) => esc(row.machine_name) },
-  trapped: { label: 'Time trapped', sort: SORT_TRAPPED, cls: 'mono', cell: (row) => esc(fmtDuration(row.trapped_seconds)) },
-  connections: { label: 'Connections', sort: SORT_CONNECTIONS, cls: 'mono num', cell: (row) => esc(fmtNumber(row.connections)) },
-  first_seen: { label: 'First seen', sort: SORT_FIRST_SEEN, cell: (row) => `<span title="${esc(fmtDateTime(row.first_seen))}">${esc(fmtRelative(row.first_seen))}</span>` },
-  last_seen: { label: 'Last seen', sort: SORT_LAST_SEEN, cell: (row) => `<span title="${esc(fmtDateTime(row.last_seen))}">${esc(fmtRelative(row.last_seen))}</span>` },
+  trapped: { label: 'Connection time (cumulative)', sort: SORT_TRAPPED, cls: 'mono', cell: (row) => `${esc(fmtDuration(row.trapped_seconds))}${row.has_undated_history ? '<span title="Includes undated imported or legacy history">*</span>' : ''}` },
+  connections: { label: 'Connections (cumulative)', sort: SORT_CONNECTIONS, cls: 'mono num', cell: (row) => `${esc(fmtNumber(row.connections))}${row.has_undated_history ? '<span title="Includes undated imported or legacy history">*</span>' : ''}` },
+  first_seen: { label: 'First observed', sort: SORT_FIRST_SEEN, cell: (row) => `<span title="${esc(fmtDateTime(row.first_seen))}">${row.first_observation_known === false ? 'Earlier observation unknown' : esc(fmtRelative(row.first_seen))}</span>` },
+  last_seen: { label: 'Last observed', sort: SORT_LAST_SEEN, cell: (row) => `<span title="${esc(fmtDateTime(row.last_seen))}">${esc(fmtRelative(row.last_seen))}</span>` },
+  last_activity: { label: 'Last measured activity', sort: 'last_activity', cell: (row) => row.last_measured_activity_at ? `<span title="${esc(fmtDateTime(row.last_measured_activity_at))}">${esc(fmtRelative(row.last_measured_activity_at))}</span>` : 'Unknown' },
   status: { label: 'Status', cell: statusCell },
 };
 
@@ -95,7 +103,7 @@ export function renderAttackersTable(host, rows, state = {}) {
   if (!rows.length) {
     host.innerHTML = emptyState({
       title: 'No attackers match',
-      text: 'Nothing has been trapped for this filter yet. Widen the range or clear the filters.',
+      text: 'No retained machine/IP rows match this filter. Widen the range or clear the filters.',
       glyph: 'search',
     });
     return;
@@ -123,35 +131,39 @@ export function renderAttackersTable(host, rows, state = {}) {
 
 /* ---------------- page ---------------- */
 
-const PAGE_COLUMNS = ['country', 'ip', 'location', 'isp', 'machine', 'trapped', 'connections', 'first_seen', 'last_seen', 'status'];
+const PAGE_COLUMNS = ['country', 'ip', 'location', 'isp', 'machine', 'trapped', 'connections', 'first_seen', 'last_activity', 'last_seen', 'status'];
 
-export async function render(mount) {
-  const state = {
-    q: '',
-    country: '',
-    status: '',
-    sort: SORT_TRAPPED,
-    order: 'desc',
-    page: 1,
-    total: 0,
-  };
+export async function render(mount, param, routeSignal, query = new URLSearchParams()) {
+  const requests = latestRequests(routeSignal);
+  const countryRequests = latestRequests(routeSignal);
+  const state = attackerState(query);
 
   mount.innerHTML = `
     <div class="page-head">
       <h1 class="page-title">Attackers</h1>
       <span class="page-sub" id="attackers-note">Loading…</span>
     </div>
+    <p class="filters-note" id="attackers-scope"></p>
     <div class="filters">
       <div class="search">
         ${icon('search', 15)}
         <input id="attackers-q" type="search" placeholder="Search by IP…" aria-label="Search attackers by IP prefix" autocapitalize="none" spellcheck="false">
       </div>
+      <select class="select select-inline" id="attackers-basis" aria-label="Choose range time basis">
+        <option value="activity">Range: measured activity</option>
+        <option value="observed">Range: exporter observation</option>
+      </select>
       <select class="select select-inline" id="attackers-country" aria-label="Filter by country"></select>
       <select class="select select-inline" id="attackers-status" aria-label="Filter by status">
         ${STATUS_FILTERS.map((option) => `<option value="${esc(option.value)}">${esc(option.label)}</option>`).join('')}
       </select>
     </div>
+    <p class="filters-note" id="attackers-metric-note"></p>
+    <details class="metric-details"><summary>About activity, totals and dates</summary><p class="filters-note">${esc(CUMULATIVE_NOTE)} ${esc(CONNECTION_TIME_NOTE)} Positive sampled growth identifies a recently active IP. IP addresses can represent several connections or people. Country counts are distinct IPs across selected machines and the chosen range/basis, before search and status filters. Dates use UTC.</p></details>
+    <div id="attackers-country-state"></div>
+    <p class="filters-note" id="attackers-country-empty" hidden>No known countries in this range and time basis.</p>
     <div class="chips" id="attackers-chips"></div>
+    <div id="attackers-row-state"></div>
     <div class="card" id="attackers-card">
       <div class="card-pad"><div class="skeleton w60"></div></div>
     </div>`;
@@ -159,45 +171,69 @@ export async function render(mount) {
   const note = mount.querySelector('#attackers-note');
   const card = mount.querySelector('#attackers-card');
   const chips = mount.querySelector('#attackers-chips');
+  const basisSelect = mount.querySelector('#attackers-basis');
   const countrySelect = mount.querySelector('#attackers-country');
   const statusSelect = mount.querySelector('#attackers-status');
   const searchInput = mount.querySelector('#attackers-q');
+  searchInput.value = state.q; basisSelect.value = state.basis; statusSelect.value = state.status;
+  const ids = machinesParam().split(',');
+  const names = currentMachines().filter(machine => ids.includes(String(machine.id)))
+    .map(machine => `${machine.name}${machine.enabled ? '' : ' (disabled history)'}`);
+  mount.querySelector('#attackers-scope').textContent = `Scope: ${names.length ? names.join(', ') : machinesParam() === '0' ? 'no machines selected' : 'selected machines'}. Range: ${getWindow()}.`;
+
 
   let countries = [];
+  countrySelect.innerHTML = '<option value="">Country: all</option>';
+  const rowState = panelState(mount.querySelector('#attackers-row-state'), 'attacker rows', () => load());
+  const countryState = panelState(mount.querySelector('#attackers-country-state'), 'country choices', () => loadCountries());
+  const describe = context => `${context.range.window}, ${context.basis === 'observed' ? 'exporter observations' : 'measured activity'}`;
 
-  const load = async () => {
+  let activeRange = rangeParams(getWindow());
+  const load = async (range = activeRange) => {
+    clearTimeout(debounce);
+    const request = requests.begin();
+    if (!request.isCurrent()) return;
+    rememberAttackers(state, machinesParam(), getWindow());
+    const context = Object.freeze({ ...state, machines: machinesParam(), range: { ...range } });
+    const description = `${describe(context)}, ${sortLabel(context.sort)}, page ${context.page}${context.q ? `, search ${context.q}` : ''}${context.country ? `, country ${context.country.replace(/^(code|name):/, '')}` : ''}${context.status ? `, ${activityLabel(context.status)}` : ''}`;
+    rowState.start(description);
     try {
       const data = await api('/attackers' + qs({
-        machines: machinesParam(),
-        window: getWindow(),
-        q: state.q,
-        country: state.country,
-        status: state.status,
-        sort: state.sort,
-        order: state.order,
-        page: state.page,
+        machines: context.machines,
+        ...context.range,
+        basis: context.basis,
+        q: context.q,
+        country_key: context.country,
+        status: context.status,
+        sort: context.sort,
+        order: context.order,
+        page: context.page,
         per_page: PER_PAGE,
-      }));
+      }), { signal: request.signal });
+      if (!request.isCurrent()) return;
       state.total = data.total;
-      paint(data);
+      paint(data, context);
+      rowState.success(data, description);
     } catch (error) {
+      if (!request.isCurrent() || isAbortError(error)) return;
       if (error.status === 401) return;
-      renderError(card, error, load);
-      note.textContent = '';
+      rowState.failure(error, description);
+      if (!rowState.hasValue) { card.innerHTML = ''; note.textContent = ''; }
     }
   };
 
-  const paint = (data) => {
+  const paint = (data, context) => updateWithFocus(card, () => {
     const rows = data.rows || [];
     const first = rows.length ? (data.page - 1) * data.per_page + 1 : 0;
     const last = (data.page - 1) * data.per_page + rows.length;
-    note.textContent = `${fmtNumber(data.total)} attackers · sorted by ${sortLabel(state.sort)}`;
+    note.textContent = `${fmtNumber(data.total)} machine/IP ${data.total === 1 ? 'row' : 'rows'} · ${fmtNumber(data.distinct_ips)} distinct ${data.distinct_ips === 1 ? 'IP' : 'IPs'} · sorted by ${sortLabel(context.sort)}`;
+    mount.querySelector('#attackers-metric-note').textContent = `${context.basis === 'observed' ? 'Range selects exporter observations, including unchanged samples.' : 'Range selects last measured counter growth.'} ${activityNote(data.activity?.threshold_seconds)} ${scrapeNote(data.activity)} UTC ${data.from} → ${data.to} (end excluded).`;
 
     card.innerHTML = '<div id="attackers-table"></div><div class="card-foot" id="attackers-foot"></div>';
     renderAttackersTable(card.querySelector('#attackers-table'), rows, {
       columns: PAGE_COLUMNS,
-      sort: state.sort,
-      order: state.order,
+      sort: context.sort,
+      order: context.order,
       onSort: (key) => {
         if (state.sort === key) state.order = state.order === 'desc' ? 'asc' : 'desc';
         else {
@@ -225,7 +261,7 @@ export async function render(mount) {
       state.page = Math.min(maxPage, state.page + 1);
       load();
     });
-  };
+  }, requests.signal);
 
   const paintChips = () => {
     if (!countries.length) {
@@ -235,8 +271,8 @@ export async function render(mount) {
     const top = countries.slice(0, TOP_COUNTRIES);
     const rest = countries.length - top.length;
     chips.innerHTML = top.map((entry) => `
-      <button type="button" class="chip" data-country="${esc(entry.country)}" aria-pressed="${state.country === entry.country}">
-        ${esc(entry.country)} · ${esc(fmtNumber(entry.count))}
+      <button type="button" class="chip" data-country="${esc(entry.country_key)}" aria-pressed="${state.country === entry.country_key}">
+        ${esc(countrySummaryLabel(entry))} · ${esc(fmtNumber(entry.count))} ${entry.count === 1 ? 'IP' : 'IPs'}
       </button>`).join('')
       + (rest > 0 ? `<span class="chip ghost">+${fmtNumber(rest)} more</span>` : '');
 
@@ -251,27 +287,43 @@ export async function render(mount) {
     });
   };
 
-  const loadCountries = async () => {
+  const loadCountries = async (range = activeRange) => {
+    const request = countryRequests.begin();
+    if (!request.isCurrent()) return;
+    const context = { machines: machinesParam(), range: { ...range }, basis: state.basis };
+    countryState.start(describe(context));
     try {
-      countries = (await api('/attackers/countries' + qs({ machines: machinesParam(), window: getWindow() })) || [])
+      const loaded = (await api('/attackers/countries' + qs({ machines: context.machines, ...context.range, basis: context.basis }), { signal: request.signal }) || [])
         .filter((entry) => entry.country);
+      if (!request.isCurrent()) return;
+      countries = loaded;
+      countryState.success(loaded, describe(context));
+      mount.querySelector('#attackers-country-empty').hidden = loaded.length !== 0;
     } catch (error) {
-      countries = [];
+      if (!request.isCurrent() || isAbortError(error)) return;
+      countryState.failure(error, describe(context));
+      mount.querySelector('#attackers-country-empty').hidden = true;
+      return;
     }
     countrySelect.innerHTML = ['<option value="">Country: all</option>']
-      .concat(countries.map((entry) => `<option value="${esc(entry.country)}">${esc(entry.country)} · ${esc(fmtNumber(entry.count))}</option>`))
+      .concat(countries.map((entry) => `<option value="${esc(entry.country_key)}">${esc(countrySummaryLabel(entry))} · ${esc(fmtNumber(entry.count))} ${entry.count === 1 ? 'IP' : 'IPs'}</option>`))
+      .concat(state.country && !countries.some(entry => entry.country_key === state.country) ? [`<option value="${esc(state.country)}">Selected country: ${esc(state.country.replace(/^(code|name):/, ''))} (no count in this range)</option>`] : [])
       .join('');
     countrySelect.value = state.country;
-    countrySelect.hidden = countries.length === 0;
+    countrySelect.hidden = countries.length === 0 && !state.country;
     paintChips();
   };
 
   let debounce = null;
+  requests.signal.addEventListener('abort', () => clearTimeout(debounce), { once: true });
   searchInput.addEventListener('input', () => {
+    requests.cancel();
+    state.q = searchInput.value.trim();
+    state.page = 1;
+    rememberAttackers(state, machinesParam(), getWindow());
     clearTimeout(debounce);
     debounce = setTimeout(() => {
-      state.q = searchInput.value.trim();
-      state.page = 1;
+      if (requests.signal.aborted) return;
       load();
     }, SEARCH_DEBOUNCE_MS);
   });
@@ -283,19 +335,26 @@ export async function render(mount) {
     load();
   });
 
+  basisSelect.addEventListener('change', () => { state.basis = basisSelect.value; state.page = 1; reload(); });
+
   statusSelect.addEventListener('change', () => {
     state.status = statusSelect.value;
     state.page = 1;
     load();
   });
 
-  onRefresh(load);
-  await Promise.all([loadCountries(), load()]);
+  const reload = async () => {
+    activeRange = rangeParams(getWindow());
+    await Promise.all([loadCountries(activeRange), load(activeRange)]);
+  };
+  onRefresh(reload, requests.signal);
+  await reload();
 }
 
 function sortLabel(sort) {
-  if (sort === SORT_LAST_SEEN) return 'last seen';
-  if (sort === SORT_FIRST_SEEN) return 'first seen';
-  if (sort === SORT_CONNECTIONS) return 'connections';
-  return 'time trapped';
+  if (sort === SORT_LAST_SEEN) return 'last observed';
+  if (sort === SORT_FIRST_SEEN) return 'first observed';
+  if (sort === SORT_CONNECTIONS) return 'cumulative connections';
+  if (sort === 'last_activity') return 'last measured activity';
+  return 'cumulative connection time';
 }

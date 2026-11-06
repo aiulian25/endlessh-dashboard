@@ -1,12 +1,17 @@
+import { updateWithFocus } from './focus.js';
+import { panelState } from './panel-state.js';
+import { latestRequests, isAbortError } from './requests.js';
+import { activityNote, scrapeNote, CONNECTION_TIME_NOTE } from './metric-notes.js';
+import { rangeParams, seriesTotals } from './time-range.js';
 /* Overview page: stat cards, activity chart, country donut, origin map, top attackers. */
 
 import {
-  api, qs, esc, onRefresh, renderError, emptyState, navigate,
+  api, qs, esc, onRefresh, emptyState, navigate,
   fmtDuration, fmtBytes, fmtNumber, fmtDelta, fmtRelative,
   machinesParam, getWindow, setWindow, windowLabel, WINDOWS,
-  currentMachines,
+  currentMachines, machineListKnown,
 } from './app.js';
-import { renderChart, renderLegend } from './chart.js';
+import { renderChart, renderLegend, coverageNote } from './chart.js';
 import { renderDonut } from './donut.js';
 import { renderMap } from './map.js';
 import { renderAttackersTable } from './attackers.js';
@@ -35,41 +40,44 @@ function statSkeleton() {
     </div>`;
 }
 
-// /api/overview carries no connection total, so the card adds up the very
-// buckets the chart beside it draws: same machines, same window, one figure.
-function connectionsIn(timeseries) {
-  const series = (timeseries && timeseries.series) || [];
-  return series.reduce((total, entry) => total
-    + (entry.points || []).reduce((sum, point) => sum + (Number(point.opens) || 0), 0), 0);
-}
-
 function countriesNote(count) {
   if (!count) return 'no country known yet';
   return `from ${fmtNumber(count)} ${count === 1 ? 'country' : 'countries'}`;
 }
 
 function latestAttackerCard(latest) {
-  if (!latest) return statCard('Latest attacker', NO_VALUE, 'nothing caught yet');
+  if (!latest) return statCard('Latest measured activity', NO_VALUE, 'no measured activity yet');
   const place = latest.location || latest.country || 'unknown location';
-  return statCard('Latest attacker', latest.ip, `${place} · ${fmtRelative(latest.at)}`, { ip: true });
+  return statCard('Latest measured activity', latest.ip, `${place} · ${fmtRelative(latest.at)}`, { ip: true });
 }
 
-export async function render(mount) {
+export async function render(mount, param, routeSignal) {
+  const requests = latestRequests(routeSignal);
+  const units = Object.fromEntries(['metrics', 'top', 'map', 'countries'].map(key => [key, latestRequests(requests.signal)]));
+  let emptyView = false;
   mount.innerHTML = `
+    <h1 class="sr-only">Overview</h1>
+    <p class="filters-note" id="ov-activity-note"></p>
+    <details class="metric-details"><summary>About sampled activity and totals</summary><p class="filters-note">Positive counter growth identifies a recently active IP. One address can represent several connections or people. Cumulative time and bytes cover dashboard history across selected machines. ${esc(CONNECTION_TIME_NOTE)}</p></details>
+    <p class="filters-note" id="ov-coverage-note"></p>
     <div class="grid-stats grid-stats-6" id="ov-stats">${statSkeleton().repeat(STAT_CARDS)}</div>
+    <div id="ov-summary-state"></div>
     <div class="grid-geo" id="ov-geo-row">
       <div class="card card-pad" id="ov-chart-card">
         <div class="card-head flush">
-          <h2 class="card-title">Attacker time trapped</h2>
+          <h2 class="card-title">Sampled connection time</h2>
           <div class="legend" id="ov-legend"></div>
           <div class="seg" id="ov-range" role="group" aria-label="Time range"></div>
         </div>
+        <div id="ov-chart-state"></div>
         <div id="ov-chart"><div class="skeleton block"></div></div>
       </div>
       <div class="card card-pad" id="ov-donut-card" hidden>
         <div class="card-head flush">
-          <h2 class="card-title">Attacks by country</h2>
+          <h2 class="card-title">Cumulative connections by country</h2>
         </div>
+        <p class="filters-note">Known-country rows with measured growth in the selected range; values include earlier cumulative history.</p>
+        <div id="ov-country-state"></div>
         <div id="ov-donut"></div>
       </div>
     </div>
@@ -78,17 +86,19 @@ export async function render(mount) {
         <h2 class="card-title">Where the attacks come from</h2>
         <span class="map-note" id="ov-map-note"></span>
       </div>
+      <div id="ov-map-state"></div>
       <div id="ov-map"></div>
     </div>
     <div class="card" id="ov-geo-off" hidden>${emptyState({
-      title: 'No geography for these machines yet',
-      text: 'Attack origins need a geography source: the labels the tarpit publishes itself, a local MaxMind database, or the optional online lookups. Settings shows which source is active.',
+      title: 'No geography in this range',
+      text: 'No known locations or countries were returned for these machines and this range. Exporter labels, a local MaxMind database or optional online lookups can provide geography. Settings shows which sources are active.',
       actionLabel: 'Open settings',
       glyph: 'info',
     })}</div>
+    <div id="ov-top-state"></div>
     <div class="card" id="ov-top">
       <div class="card-head">
-        <h2 class="card-title">Top attackers</h2>
+        <h2 class="card-title">Top cumulative machine/IP rows</h2>
         <a href="#/attackers">View all</a>
       </div>
       <div class="card-pad"><div class="skeleton w60"></div></div>
@@ -121,87 +131,127 @@ export async function render(mount) {
     });
   };
 
-  const paintStats = (overview, connections) => {
+  const paintStats = (overview, totals, context) => {
+    mount.querySelector('#ov-activity-note').textContent = `${activityNote(overview.activity?.threshold_seconds)} ${scrapeNote(overview.activity)}`;
     stats.innerHTML = [
-      statCard('Connections', fmtNumber(connections), `in ${windowLabel()}`),
-      statCard('Time wasted', fmtDuration(overview.time_wasted_seconds),
-        `${fmtDelta(overview.time_wasted_delta_seconds, fmtDuration)} in ${windowLabel()}`),
-      statCard('Junk data sent', fmtBytes(overview.bytes_sent),
-        `${fmtDelta(overview.bytes_sent_delta, fmtBytes)} in ${windowLabel()}`),
-      statCard('Unique attackers', fmtNumber(overview.unique_attackers), countriesNote(overview.countries)),
-      statCard('Trapped right now', fmtNumber(overview.trapped_now),
-        `across ${fmtNumber(overview.machine_count)} machine${overview.machine_count === 1 ? '' : 's'}`, { accent: true }),
+      statCard('Connections opened', fmtNumber(totals.opens), `recorded in ${windowLabel(context.window)}`),
+      statCard('Connection time (cumulative)', fmtDuration(overview.time_wasted_seconds),
+        `${fmtDelta(totals.trapped_seconds, fmtDuration)} recorded in ${windowLabel(context.window)}`),
+      statCard('Bytes sent (cumulative)', fmtBytes(overview.bytes_sent),
+        `${fmtDelta(totals.bytes_sent, fmtBytes)} recorded in ${windowLabel(context.window)}`),
+      statCard('Distinct IPs in range', fmtNumber(overview.unique_attackers), countriesNote(overview.countries)),
+      statCard('Recently active IPs', fmtNumber(overview.trapped_now),
+        `sampled across ${fmtNumber(overview.machine_count)} machine${overview.machine_count === 1 ? '' : 's'}`, { accent: true }),
       latestAttackerCard(overview.latest_attacker),
     ].join('');
   };
 
-  // Geography is optional everywhere, so an install with none is told so once
-  // rather than shown two empty frames.
-  const paintGeography = (points, countries) => {
-    donutCard.hidden = !countries.length;
-    mapCard.hidden = !points.length;
-    geoOffCard.hidden = Boolean(points.length || countries.length);
-    geoRow.classList.toggle('solo', !countries.length);
-
-    if (countries.length) renderDonut(donutHost, countries);
-    if (!points.length) return;
-    mapNote.textContent = `bubble size = connections · last ${getWindow()}`;
-    renderMap(mapHost, points);
+  // Empty is authoritative only when both geography requests succeeded for
+  // the same range. A failure never becomes a configuration diagnosis.
+  const paintGeographyVisibility = () => {
+    const sameContext = pointsState.context === countriesState.context;
+    geoOffCard.hidden = !(pointsState.hasValue && countriesState.hasValue &&
+      !pointsState.failed && !countriesState.failed && !pointsState.pending && !countriesState.pending && sameContext &&
+      !pointsState.value.length && !countriesState.value.length);
+    mapCard.hidden = pointsState.hasValue && !pointsState.failed && !pointsState.pending && !pointsState.value.length;
+    donutCard.hidden = countriesState.hasValue && !countriesState.failed && !countriesState.pending && !countriesState.value.length;
+    geoRow.classList.toggle('solo', donutCard.hidden || !countriesState.value?.length);
   };
 
   const paintTop = (attackers) => {
     topCard.innerHTML = `
       <div class="card-head">
-        <h2 class="card-title">Top attackers</h2>
-        <a href="#/attackers">View all ${esc(fmtNumber(attackers.total))}</a>
+        <h2 class="card-title">Top cumulative machine/IP rows</h2>
+        <a href="#/attackers">View all ${esc(fmtNumber(attackers.total))} rows</a>
       </div>
       <div id="ov-top-table"></div>`;
+    const scope = document.createElement('p'); scope.className = 'filters-note card-pad'; scope.textContent = `${attackers.distinct_ips ?? '—'} distinct ${attackers.distinct_ips === 1 ? 'IP' : 'IPs'} across ${attackers.total} matching machine/IP ${attackers.total === 1 ? 'row' : 'rows'}. Values are retained cumulative totals; * includes undated history.`; topCard.append(scope);
     renderAttackersTable(topCard.querySelector('#ov-top-table'), attackers.rows || [], { columns: TOP_COLUMNS });
   };
 
-  const showEmpty = () => {
-    stopRefresh();
-    mount.innerHTML = `<div class="card">${emptyState({
-      title: 'No machines registered yet',
-      text: 'Add the first endlessh-go machine you want to watch. The dashboard scrapes its Prometheus metrics endpoint and starts collecting history straight away.',
-      actionLabel: 'Add your first machine',
-    })}</div>`;
-    mount.querySelector('[data-empty-action]').addEventListener('click', () => navigate('#/machines'));
-  };
+  const summaryState = panelState(mount.querySelector('#ov-summary-state'), 'summary', () => load(['summary']));
+  const chartState = panelState(mount.querySelector('#ov-chart-state'), 'chart', () => load(['chart']));
+  const topState = panelState(mount.querySelector('#ov-top-state'), 'top attackers', () => load(['top']));
+  const pointsState = panelState(mount.querySelector('#ov-map-state'), 'map', () => load(['map']));
+  const countriesState = panelState(mount.querySelector('#ov-country-state'), 'countries', () => load(['countries']));
 
-  const load = async () => {
-    try {
-      const machines = currentMachines();
-      if (!machines.length) {
-        showEmpty();
-        return;
-      }
-
-      const params = { machines: machinesParam(), window: getWindow() };
-      const [overview, timeseries, attackers, points, countries] = await Promise.all([
-        api('/overview' + qs(params)),
-        api('/timeseries' + qs(params)),
-        api('/attackers' + qs({ ...params, sort: 'trapped_seconds', order: 'desc', page: 1, per_page: TOP_ROWS })),
-        // Geography is an optional extra: a server that cannot answer for it
-        // should cost the page its map, not its numbers.
-        api('/geo/points' + qs(params)).catch(() => []),
-        api('/geo/countries' + qs(params)).catch(() => []),
-      ]);
-
-      paintStats(overview, connectionsIn(timeseries));
-      renderLegend(legendHost, timeseries.series || []);
-      renderChart(chartHost, timeseries, { label: 'Attacker time trapped', format: fmtDuration });
-      paintGeography(points || [], countries || []);
-      paintTop(attackers);
-    } catch (error) {
-      if (error.status === 401) return;
-      stopRefresh();
-      mount.innerHTML = '';
-      renderError(mount, error, () => render(mount));
+  const load = async (only = ['summary', 'chart', 'top', 'map', 'countries']) => {
+    if (requests.signal.aborted) return;
+    if (emptyView) {
+      if (machineListKnown() && !currentMachines().length) return;
+      requests.dispose();
+      return render(mount, param, routeSignal);
     }
+    const context = Object.freeze({ window: getWindow(), machines: machinesParam() });
+    const description = windowLabel(context.window);
+    if (machineListKnown() && !currentMachines().length) {
+      emptyView = true;
+      mount.innerHTML = `<div class="card">${emptyState({title:'No machines registered yet',text:'Add the first endlessh-go machine you want to watch.',actionLabel:'Add your first machine'})}</div>`;
+      mount.querySelector('[data-empty-action]').addEventListener('click', () => navigate('#/machines'));
+      return;
+    }
+    const params = { machines: context.machines, ...rangeParams(context.window) };
+    const wanted = new Set(only);
+    if (wanted.has('summary') || wanted.has('chart')) { wanted.add('summary'); wanted.add('chart'); }
+    const metricsRequest = wanted.has('summary') ? units.metrics.begin() : null;
+    const overview = wanted.has('summary') ? api('/overview' + qs(params), { signal: metricsRequest.signal }) : null;
+    const timeseries = wanted.has('summary') || wanted.has('chart') ? api('/timeseries' + qs(params), { signal: metricsRequest.signal }) : null;
+    const accept = async (request, state, promise, paint) => {
+      state.start(description);
+      paintGeographyVisibility();
+      try {
+        const data = await promise;
+        if (!request.isCurrent()) return;
+        const region = state === summaryState ? stats : state === chartState ? chartHost : state === topState ? topCard : state === pointsState ? mapHost : donutHost;
+        updateWithFocus(region, () => {
+          if (!request.isCurrent()) return;
+          paint(data); state.success(data, description); paintGeographyVisibility();
+        }, requests.signal);
+      } catch (error) {
+        if (!request.isCurrent() || isAbortError(error) || error.status === 401) return;
+        state.failure(error, description);
+        if (!state.hasValue) {
+          if (state === summaryState) stats.innerHTML = '';
+          if (state === chartState) chartHost.innerHTML = '';
+          if (state === topState) topCard.innerHTML = '<div class="card-pad">Top attackers unavailable.</div>';
+        }
+      } finally {
+        if (request.isCurrent()) paintGeographyVisibility();
+      }
+    };
+    const tasks = [];
+    if (wanted.has('summary')) tasks.push(accept(metricsRequest, summaryState, Promise.all([overview, timeseries]), ([data, series]) => paintStats(data, seriesTotals(series), context)));
+    if (wanted.has('chart')) tasks.push(accept(metricsRequest, chartState, timeseries, data => {
+      mount.querySelector('#ov-coverage-note').textContent = coverageNote(data);
+      renderLegend(legendHost, data.series || []);
+      renderChart(chartHost, data, { label:'Sampled connection time (connection-seconds)',format:fmtDuration });
+    }));
+    const panel = (key, state, path, paint) => {
+      if (!wanted.has(key)) return;
+      const request = units[key].begin();
+      const result = api(path, {signal:request.signal}).then(data => {
+        if ((key === 'map' || key === 'countries') && !Array.isArray(data)) throw new Error('Invalid geography response.');
+        return data;
+      });
+      tasks.push(accept(request, state, result, paint));
+    };
+    panel('top', topState, '/attackers' + qs({...params,sort:'trapped_seconds',order:'desc',page:1,per_page:TOP_ROWS}), paintTop);
+    panel('map', pointsState, '/geo/points' + qs(params), data => {
+      mapNote.textContent = `bubble size = retained cumulative connections · IPs with measured growth in ${context.window}`;
+      renderMap(mapHost, data || []);
+    });
+    panel('countries', countriesState, '/geo/countries' + qs(params), data => renderDonut(donutHost,data || []));
+    // Failed first loads replace skeletons, while prior successful payloads stay.
+    // A failed linked summary must not leave its sibling request outside the refresh round.
+    await Promise.allSettled([...tasks, overview, timeseries]);
+    if (requests.signal.aborted) return;
+    if (summaryState.failed && !summaryState.hasValue) stats.innerHTML = '';
+    if (chartState.failed && !chartState.hasValue) chartHost.innerHTML = '';
+    if (topState.failed && !topState.hasValue) topCard.innerHTML = '<div class="card-pad">Top attackers unavailable.</div>';
+    paintGeographyVisibility();
   };
 
   paintRange();
-  const stopRefresh = onRefresh(load);
+  onRefresh(() => load(), requests.signal);
   await load();
 }

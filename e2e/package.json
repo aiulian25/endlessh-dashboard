@@ -1,0 +1,7 @@
+{
+  "name": "endlessh-dashboard-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test:ui": "node --test ui-refresh.spec.js" },
+  "devDependencies": { "playwright": "1.62.1" }
+}

@@ -1,3 +1,4 @@
+import { countrySummaryLabel } from './country.js';
 /* World map of attacker origins for the /api/geo/points payload.
  *
  * The outline ships with the app, so the map draws with no tile server and no
@@ -13,11 +14,11 @@ const TIP_GAP = 10;
 const UNKNOWN_COUNTRY = 'Unknown';
 
 function countryName(point) {
-  return point.country || point.country_code || UNKNOWN_COUNTRY;
+  return countrySummaryLabel(point) || UNKNOWN_COUNTRY;
 }
 
 function countryKey(point) {
-  return point.country_code || point.country || '';
+  return point.country_key || point.country_code || point.country || '';
 }
 
 function connectionsOf(point) {
@@ -44,12 +45,12 @@ function radiusFor(connections, peak) {
   return Math.max(MIN_RADIUS, MAX_RADIUS * Math.sqrt(Math.max(0, connections) / peak));
 }
 
-function plural(count, word) {
-  return `${fmtNumber(count)} ${word}${Number(count) === 1 ? '' : 's'}`;
+function plural(count, word, pluralWord = word + 's') {
+  return `${fmtNumber(count)} ${Number(count) === 1 ? word : pluralWord}`;
 }
 
 function bubbleLabel(point) {
-  return `${countryName(point)}: ${plural(point.attackers, 'attacker')}, ${plural(point.connections, 'connection')}`;
+  return `${countryName(point)}: ${plural(point.attackers, 'distinct IP')}, ${plural(point.connections, 'cumulative connection')}`;
 }
 
 function screenReaderTable(points, caption) {
@@ -73,9 +74,9 @@ function screenReaderTable(points, caption) {
       <thead>
         <tr>
           <th scope="col">Country</th>
-          <th scope="col">Attackers</th>
-          <th scope="col">Connections</th>
-          <th scope="col">Time trapped</th>
+          <th scope="col">Distinct IPs at this place</th>
+          <th scope="col">Cumulative connections</th>
+          <th scope="col">Cumulative connection time</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -107,7 +108,7 @@ export function renderMap(host, points) {
         tabindex="0" data-point="${index}" aria-label="${esc(bubbleLabel(point))}"></circle>`;
     }).join('');
 
-  const summary = `World map of attacker origins: ${fmtNumber(placed.length)} places in ${fmtNumber(ranks.size)} countries`;
+  const summary = `Displayed locations: ${plural(placed.length, 'shown place')} in ${plural(ranks.size, 'country', 'countries')}`;
 
   host.innerHTML = `
     <div class="map">
@@ -117,7 +118,7 @@ export function renderMap(host, points) {
         ${bubbles}
       </svg>
       <div class="map-tip" hidden></div>
-      ${screenReaderTable(placed, `Busiest attacker origins. ${summary}.`)}
+      ${screenReaderTable(placed, `Retained cumulative connection totals for IPs with measured growth in the selected range. ${summary}.`)}
     </div>`;
 
   const frame = host.querySelector('.map');
@@ -134,9 +135,9 @@ export function renderMap(host, points) {
 
     tip.innerHTML = `
       <div class="map-tip-name">${esc(countryName(point))}</div>
-      <div class="map-tip-row"><span>Attackers</span><span>${esc(fmtNumber(point.attackers))}</span></div>
-      <div class="map-tip-row"><span>Connections</span><span>${esc(fmtNumber(point.connections))}</span></div>
-      <div class="map-tip-row"><span>Time trapped</span><span>${esc(fmtDuration(point.trapped_seconds))}</span></div>`;
+      <div class="map-tip-row"><span>Distinct IPs at this place</span><span>${esc(fmtNumber(point.attackers))}</span></div>
+      <div class="map-tip-row"><span>Cumulative connections</span><span>${esc(fmtNumber(point.connections))}</span></div>
+      <div class="map-tip-row"><span>Cumulative connection time</span><span>${esc(fmtDuration(point.trapped_seconds))}</span></div>`;
     tip.hidden = false;
 
     const frameBox = frame.getBoundingClientRect();

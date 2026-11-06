@@ -20,7 +20,7 @@
 
   <div id="app" class="app" hidden>
     <header class="topbar">
-      <button type="button" class="icon-btn drawer-btn" id="drawer-btn" aria-label="Show machines" aria-expanded="false" aria-controls="sidebar"></button>
+      <button type="button" class="icon-btn drawer-btn" id="drawer-btn" aria-label="Show machines" aria-expanded="false" aria-controls="sidebar" aria-haspopup="dialog"></button>
 
       <a class="wordmark" href="#/overview">
         <img class="wordmark-logo" src="logo.png" width="28" height="28" alt="">
@@ -42,8 +42,9 @@
     <div class="shell">
       <aside class="sidebar" id="sidebar" aria-labelledby="side-label">
         <div class="side-head">
-          <span class="side-label" id="side-label">Machines</span>
+          <span class="side-label" id="side-label" data-focus-heading>Machines</span>
           <span class="side-count" id="side-count"></span>
+          <button type="button" class="icon-btn" id="drawer-close" aria-label="Close machines" hidden>×</button>
         </div>
 
         <div class="seg side-bulk" role="group" aria-label="Select machines">

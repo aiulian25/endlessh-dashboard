@@ -1,3 +1,4 @@
+import { latestRequests, isAbortError } from './requests.js';
 /* Settings page: everything you manage rather than watch — password, theme,
    backups, and the read-only view of the geography sources and effective
    configuration the container actually loaded. */
@@ -18,7 +19,12 @@ const THEME_OPTIONS = [
 
 const DAY_LABEL = (days) => `${fmtNumber(days)} day${Number(days) === 1 ? '' : 's'}`;
 
-const ONLINE_PROVIDER = 'ip-api.com';
+function onlineDestination(settings) {
+  const host = settings.geoip_online_provider_host || 'the configured provider';
+  const transport = settings.geoip_online_scheme === 'https' ? 'HTTPS (encrypted in transit)'
+    : settings.geoip_online_scheme === 'http' ? 'HTTP (unencrypted)' : 'the configured transport';
+  return `${host} over ${transport}`;
+}
 
 function configRows(settings) {
   return [
@@ -42,19 +48,19 @@ function geographyRows(settings) {
 
   const online = settings.geoip_online_enabled
     ? `On — up to ${fmtNumber(settings.geoip_online_rate_per_minute)} lookups a minute`
-    : 'Off — no attacker address leaves this host';
+    : 'Off — no online lookup requests are sent';
 
   return [
     ['Tarpit labels', 'Always tried first — country and location as the tarpit itself reports them'],
     ['Local database', local],
-    [`Online lookups (${ONLINE_PROVIDER})`, online],
+    [`Online lookups (${settings.geoip_online_provider_host || 'configured provider'})`, online],
   ];
 }
 
 function geographyCard(settings) {
   const warning = settings.geoip_online_enabled
-    ? `Online lookups are on: the address of each attacker the first two sources could not place is sent to ${ONLINE_PROVIDER}, a third party, over an unencrypted connection. Results are cached and rate-limited.`
-    : `Online lookups are off. Switched on, they would send the address of each attacker the first two sources could not place to ${ONLINE_PROVIDER}, a third party.`;
+    ? `Online lookups are on: the address of each attacker the first two sources could not place is sent to ${onlineDestination(settings)}. Results are cached and rate-limited.`
+    : `Online lookups are off. Switched on, they would send the address of each attacker the first two sources could not place to ${onlineDestination(settings)}.`;
 
   return `
     <div class="card">
@@ -111,7 +117,8 @@ function themeCard() {
     </div>`;
 }
 
-export async function render(mount) {
+export async function render(mount, param, routeSignal) {
+  const requests = latestRequests(routeSignal);
   const session = getSession();
 
   mount.innerHTML = `
@@ -182,13 +189,16 @@ export async function render(mount) {
 
   // Backups own their loading and error handling, so this is fired off rather
   // than awaited: a slow listing must not hold up the rest of the page.
-  renderBackups(mount.querySelector('#backups-host'));
+  renderBackups(mount.querySelector('#backups-host'), routeSignal).catch(() => {});
 
   const configCard = mount.querySelector('#config-card');
   const geoCard = mount.querySelector('#geo-card');
   const loadConfig = async () => {
+    const request = requests.begin();
+    if (!request.isCurrent()) return;
     try {
-      const settings = await api('/settings');
+      const settings = await api('/settings', { signal: request.signal });
+      if (!request.isCurrent()) return;
       geoCard.innerHTML = geographyCard(settings);
       configCard.innerHTML = `
         <div class="card-head">
@@ -203,6 +213,7 @@ export async function render(mount) {
           </table>
         </div>`;
     } catch (error) {
+      if (!request.isCurrent() || isAbortError(error)) return;
       if (error.status === 401) return;
       geoCard.innerHTML = '';
       configCard.innerHTML = '';
