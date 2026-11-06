@@ -133,7 +133,7 @@ func (s *Service) Update(ctx context.Context, id int64, input MachineInput) (sto
 		}
 		return store.Machine{}, err
 	}
-	return existing, nil
+	return s.store.GetMachine(ctx, id)
 }
 
 // Reorder records the sidebar order. It is deliberately thin — there is nothing

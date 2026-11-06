@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"endlessh-dashboard/internal/ipidentity"
 	"errors"
 	"fmt"
 	"strings"
@@ -33,10 +34,18 @@ type Overview struct {
 }
 
 type SeriesPoint struct {
-	At             time.Time
-	TrappedSeconds float64
-	Opens          int64
-	BytesSent      int64
+	At              time.Time
+	To              time.Time
+	Coverage        string
+	ObservedSeconds float64
+	Attempts        int64
+	Successes       int64
+	UncertainFrom   *time.Time
+	UncertainTo     *time.Time
+	Partial         bool
+	TrappedSeconds  float64
+	Opens           int64
+	BytesSent       int64
 }
 
 type MachineSeries struct {
@@ -46,46 +55,55 @@ type MachineSeries struct {
 }
 
 type AttackerRow struct {
-	MachineID      int64
-	MachineName    string
-	IPAddress      string
-	Country        string
-	CountryCode    string
-	Geohash        string
-	Location       string
-	ISP            string
-	Latitude       *float64
-	Longitude      *float64
-	FirstSeen      time.Time
-	LastSeen       time.Time
-	Connections    int64
-	TrappedSeconds float64
-	Status         string
+	MachineID              int64
+	MachineName            string
+	IPAddress              string
+	Country                string
+	CountryCode            string
+	Geohash                string
+	Location               string
+	ISP                    string
+	Latitude               *float64
+	Longitude              *float64
+	FirstSeen              time.Time
+	LastSeen               time.Time
+	LastObservedAt         time.Time
+	LastMeasuredActivityAt *time.Time
+	HasUndatedHistory      bool
+	FirstObservationKnown  bool
+	Connections            int64
+	TrappedSeconds         float64
+	Status                 string
 }
 
 type AttackerFilter struct {
-	MachineIDs     []int64
-	Since          time.Time
-	Country        string
-	Status         string
-	Search         string
-	SortColumn     string
-	SortDescending bool
-	Page           int
-	PerPage        int
-	ActiveSince    time.Time
+	MachineIDs      []int64
+	Since           time.Time
+	Country         string
+	CountryKey      string
+	Status          string
+	Search          string
+	SortColumn      string
+	SortDescending  bool
+	Page            int
+	PerPage         int
+	ActiveSince     time.Time
+	ObservationOnly bool
+	Until           time.Time
 }
 
 type AttackerPage struct {
-	Total   int
-	Page    int
-	PerPage int
-	Rows    []AttackerRow
+	DistinctIPs int
+	Total       int
+	Page        int
+	PerPage     int
+	Rows        []AttackerRow
 }
 
 // GeoPoint is one bubble on the map: every attacker whose coordinate rounds to
 // the same place, counted once each however many machines saw it.
 type GeoPoint struct {
+	CountryKey     string
 	Latitude       float64
 	Longitude      float64
 	Country        string
@@ -97,6 +115,7 @@ type GeoPoint struct {
 
 // CountryTotal is one row of the country breakdown beside the map.
 type CountryTotal struct {
+	CountryKey  string
 	Country     string
 	CountryCode string
 	Attackers   int
@@ -129,7 +148,7 @@ const attackerColumns = `attackers.machine_id, machines.name, attackers.ip_addre
 		attackers.country, attackers.country_code, attackers.geohash,
 		attackers.location, attackers.isp, attackers.latitude, attackers.longitude,
 		attackers.first_seen, attackers.last_seen, attackers.last_activity_at,
-		attackers.connections, attackers.trapped_seconds`
+		attackers.connections, attackers.trapped_seconds, attackers.last_observed_at, attackers.last_measured_activity_at, attackers.has_undated_history, attackers.first_observation_known`
 
 // geoPointDecimalPlaces rounds coordinates to about eleven kilometres, so one
 // city is one bubble instead of a smear of near-identical points.
@@ -142,18 +161,13 @@ const geoPointDecimalPlaces = 1
 // quietest tail, and 500 overlapping bubbles already saturate a world map.
 const maxGeoPoints = 500
 
-// maxCountryTotals is a ceiling, not a display cap. Grouping by country can
-// only produce as many rows as there are country names — about two hundred,
-// plus the odd duplicate where two geography sources spell one country
-// differently — so this query cannot run away the way the map can. The limit
-// sits well above that so it never truncates in practice: the donut prints the
-// number of countries it was given (web/donut.js), and a cap low enough to bite
-// would make it understate the world rather than bound anything real.
+// maxCountryTotals bounds summaries, including arbitrary name-only fallback groups.
 const maxCountryTotals = 300
 
 var attackerSortColumns = map[string]string{
 	"trapped_seconds": "trapped_seconds",
 	"last_seen":       "last_seen",
+	"last_activity":   "last_measured_activity_at",
 	"first_seen":      "first_seen",
 	"connections":     "connections",
 	"ip":              "ip_address",
@@ -162,7 +176,9 @@ var attackerSortColumns = map[string]string{
 
 const defaultAttackerSort = "trapped_seconds"
 
-func (s *Store) Overview(ctx context.Context, machineIDs []int64, since, activeSince time.Time) (Overview, error) {
+func (s *Store) Overview(ctx context.Context, machineIDs []int64, since, activeSince time.Time, until ...time.Time) (Overview, error) {
+	since = MinuteBoundary(since)
+	end := optionalUntil(until)
 	overview := Overview{MachineCount: len(machineIDs)}
 	if len(machineIDs) == 0 {
 		return overview, nil
@@ -187,17 +203,19 @@ func (s *Store) Overview(ctx context.Context, machineIDs []int64, since, activeS
 		return Overview{}, fmt.Errorf("overview attackers: %w", err)
 	}
 
-	windowed := s.database.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(trapped_seconds), 0), COALESCE(SUM(bytes_sent), 0)
-		 FROM machine_rollups WHERE `+machineFilter+` AND bucket >= ?`,
-		withArg(args, since.Unix())...)
+	rangeArgs := withArg(args, since.Unix())
+	upper := ""
+	newUpper := ""
+	if !end.IsZero() {
+		upper = " AND bucket < ?"
+		newUpper = " AND MIN(first_seen) < ?"
+		rangeArgs = append(rangeArgs, end.Unix())
+	}
+	windowed := s.database.QueryRowContext(ctx, `SELECT COALESCE(SUM(trapped_seconds),0),COALESCE(SUM(bytes_sent),0) FROM machine_rollups WHERE `+machineFilter+` AND bucket >= ?`+upper, rangeArgs...)
 	if err := windowed.Scan(&overview.TimeWastedDeltaSeconds, &overview.BytesSentDelta); err != nil {
 		return Overview{}, fmt.Errorf("overview window: %w", err)
 	}
-
-	newAttackers := s.database.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT ip_address) FROM attackers WHERE `+machineFilter+` AND first_seen >= ?`,
-		withArg(args, since.Unix())...)
+	newAttackers := s.database.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT ip_address FROM attackers WHERE `+machineFilter+` GROUP BY ip_address HAVING MIN(first_seen)>=? AND MIN(first_observation_known)=1`+newUpper+`)`, rangeArgs...)
 	if err := newAttackers.Scan(&overview.AttackersTrappedDelta); err != nil {
 		return Overview{}, fmt.Errorf("overview new attackers: %w", err)
 	}
@@ -209,16 +227,16 @@ func (s *Store) Overview(ctx context.Context, machineIDs []int64, since, activeS
 		return Overview{}, fmt.Errorf("overview trapped now: %w", err)
 	}
 
-	// COUNT(DISTINCT ...) skips NULLs, so the CASE turns an unplaced address into
-	// one instead of counting "" as a country of its own.
-	inWindow := s.database.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT ip_address),
-				COUNT(DISTINCT CASE WHEN country <> '' THEN country END)
-		 FROM attackers WHERE `+machineFilter+` AND last_seen >= ?`,
-		withArg(args, since.Unix())...)
+	// COUNT(DISTINCT ...) skips the NULL identity of an unknown country.
+	activityUpper := ""
+	if !end.IsZero() {
+		activityUpper = " AND last_measured_activity_at < ?"
+	}
+	inWindow := s.database.QueryRowContext(ctx, `SELECT COUNT(DISTINCT ip_address),COUNT(DISTINCT `+countryKeySQL+`) FROM attackers WHERE `+machineFilter+` AND last_measured_activity_at >= ?`+activityUpper, rangeArgs...)
 	if err := inWindow.Scan(&overview.UniqueAttackers, &overview.Countries); err != nil {
 		return Overview{}, fmt.Errorf("overview window attackers: %w", err)
 	}
+
 	return overview, nil
 }
 
@@ -271,22 +289,27 @@ func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to tim
 		machineIDs[index] = machine.ID
 	}
 
+	if bucketSeconds < 60 || bucketSeconds%60 != 0 {
+		return nil, fmt.Errorf("chart bucket must be a whole number of minutes")
+	}
+	if to.Before(from) {
+		return nil, fmt.Errorf("range end precedes start")
+	}
+	span := NewTimeRange(from, to)
+	from, to = span.From, span.To
 	firstBucket := from.Unix() / int64(bucketSeconds) * int64(bucketSeconds)
-	lastBucket := to.Unix() / int64(bucketSeconds) * int64(bucketSeconds)
-
-	// The filter runs against the per-minute rollup key, so the upper bound has
-	// to cover the whole final bucket. Filtering on lastBucket itself would keep
-	// only the single minute that happens to align with it and silently drop the
-	// rest of the newest point — the one the operator is actually watching.
-	lastMinuteInRange := lastBucket + int64(bucketSeconds) - 1
-
-	args := append(int64Args(machineIDs), firstBucket, lastMinuteInRange)
-	rows, err := s.database.QueryContext(ctx,
+	args := append(int64Args(machineIDs), from.Unix(), to.Unix())
+	tx, err := s.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx,
 		`SELECT machine_id,
 				bucket / ? * ? AS aligned,
 				SUM(trapped_seconds), SUM(opens), SUM(bytes_sent)
 		 FROM machine_rollups
-		 WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket >= ? AND bucket <= ?
+		 WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket >= ? AND bucket < ?
 		 GROUP BY machine_id, aligned`,
 		append([]any{bucketSeconds, bucketSeconds}, args...)...)
 	if err != nil {
@@ -314,12 +337,64 @@ func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to tim
 		return nil, err
 	}
 
+	rows.Close()
+	coverageRows, err := tx.QueryContext(ctx, `SELECT machine_id,bucket / ? * ?,SUM(covered_seconds),SUM(attempts),SUM(successes),MIN(uncertain_from),MAX(uncertain_to)
+ FROM scrape_coverage WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket>=? AND bucket<? GROUP BY machine_id,bucket / ?`, append(append([]any{bucketSeconds, bucketSeconds}, args...), bucketSeconds)...)
+	if err != nil {
+		return nil, err
+	}
+	for coverageRows.Next() {
+		var id, b int64
+		var seconds float64
+		var attempts, successes int64
+		var low, high sql.NullInt64
+		if err = coverageRows.Scan(&id, &b, &seconds, &attempts, &successes, &low, &high); err != nil {
+			break
+		}
+		key := bucketKey{id, b}
+		p := values[key]
+		p.ObservedSeconds = seconds
+		p.Attempts = attempts
+		p.Successes = successes
+		p.UncertainFrom = timeFromNullable(low)
+		p.UncertainTo = timeFromNullable(high)
+		values[key] = p
+	}
+	if err == nil {
+		err = coverageRows.Err()
+	}
+	coverageRows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
 	series := make([]MachineSeries, 0, len(machines))
 	for _, machine := range machines {
 		machineSeries := MachineSeries{MachineID: machine.ID, MachineName: machine.Name}
-		for bucket := firstBucket; bucket <= lastBucket; bucket += int64(bucketSeconds) {
+		for bucket := firstBucket; from.Before(to) && bucket < to.Unix(); bucket += int64(bucketSeconds) {
 			point := values[bucketKey{machine.ID, bucket}]
-			point.At = time.Unix(bucket, 0).UTC()
+			start := time.Unix(bucket, 0).UTC()
+			end := start.Add(time.Duration(bucketSeconds) * time.Second)
+			point.At = start
+			point.To = end
+			if point.At.Before(from) {
+				point.At = from
+				point.Partial = true
+			}
+			if point.To.After(to) {
+				point.To = to
+				point.Partial = true
+			}
+			point.Coverage = "unknown"
+			if point.ObservedSeconds > 0 || point.Attempts > 0 {
+				point.Coverage = "incomplete"
+			}
+			if point.ObservedSeconds+0.000001 >= point.To.Sub(point.At).Seconds() {
+				point.Coverage = "complete"
+			}
 			machineSeries.Points = append(machineSeries.Points, point)
 		}
 		series = append(series, machineSeries)
@@ -384,36 +459,51 @@ func (s *Store) ListAttackers(ctx context.Context, filter AttackerFilter) (Attac
 	args := int64Args(filter.MachineIDs)
 
 	if !filter.Since.IsZero() {
-		conditions = append(conditions, "attackers.last_seen >= ?")
-		args = append(args, filter.Since.Unix())
+		column := "attackers.last_measured_activity_at"
+		if filter.ObservationOnly {
+			column = "attackers.last_observed_at"
+		}
+		conditions = append(conditions, column+" >= ?")
+		args = append(args, MinuteBoundary(filter.Since).Unix())
 	}
-	// A country arrives here as whatever the caller had to hand: the chips on the
-	// attackers page are built from the country name, while anything keyed off
-	// the map or the donut carries the ISO code. The same country can also be
-	// stored under both spellings at once, because a tarpit's own labels say
-	// "Netherlands" while the online lookup that filled in the ISO code says
-	// "The Netherlands". Matching either column keeps one country one filter
-	// however its rows were labelled.
-	if filter.Country != "" {
+	if !filter.Until.IsZero() {
+		column := "attackers.last_measured_activity_at"
+		if filter.ObservationOnly {
+			column = "attackers.last_observed_at"
+		}
+		conditions = append(conditions, column+" < ?")
+		args = append(args, MinuteBoundary(filter.Until).Unix())
+	}
+	// Stable keys take precedence; keep the original name/code filter for clients.
+	if filter.CountryKey != "" {
+		conditions = append(conditions, "("+countryKeySQL+") = ?")
+		args = append(args, filter.CountryKey)
+	} else if filter.Country != "" {
 		conditions = append(conditions, "(attackers.country = ? OR attackers.country_code = ?)")
 		args = append(args, filter.Country, filter.Country)
 	}
 	if filter.Search != "" {
 		conditions = append(conditions, "attackers.ip_address LIKE ?")
-		args = append(args, escapeLikePrefix(filter.Search)+"%")
+		search := filter.Search
+		if canonical, err := ipidentity.Canonical(search); err == nil {
+			search = canonical
+		}
+		args = append(args, escapeLikePrefix(search)+"%")
 	}
 	switch filter.Status {
+	case "unknown":
+		conditions = append(conditions, "attackers.last_measured_activity_at IS NULL")
 	case StatusTrapped:
 		conditions = append(conditions, "attackers.last_activity_at >= ?")
 		args = append(args, filter.ActiveSince.Unix())
 	case StatusGaveUp:
-		conditions = append(conditions, "attackers.last_activity_at < ?")
+		conditions = append(conditions, "attackers.last_activity_at < ? AND attackers.last_measured_activity_at IS NOT NULL")
 		args = append(args, filter.ActiveSince.Unix())
 	}
 	where := " WHERE " + strings.Join(conditions, " AND ")
 
 	if err := s.database.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM attackers"+where, args...).Scan(&page.Total); err != nil {
+		"SELECT COUNT(*),COUNT(DISTINCT ip_address) FROM attackers"+where, args...).Scan(&page.Total, &page.DistinctIPs); err != nil {
 		return AttackerPage{}, fmt.Errorf("count attackers: %w", err)
 	}
 
@@ -432,11 +522,7 @@ func (s *Store) ListAttackers(ctx context.Context, filter AttackerFilter) (Attac
 	}
 
 	rows, err := s.database.QueryContext(ctx,
-		`SELECT `+attackerColumns+`
-		 FROM attackers
-		 JOIN machines ON machines.id = attackers.machine_id`+where+
-			` ORDER BY attackers.`+sortColumn+` `+direction+`, attackers.ip_address ASC
-		 LIMIT ? OFFSET ?`,
+		attackerPageQuery(where, sortColumn, direction),
 		append(args, filter.PerPage, offset)...)
 	if err != nil {
 		return AttackerPage{}, fmt.Errorf("list attackers: %w", err)
@@ -449,7 +535,10 @@ func (s *Store) ListAttackers(ctx context.Context, filter AttackerFilter) (Attac
 			return AttackerPage{}, err
 		}
 		row.Status = StatusGaveUp
-		if lastActivityAt >= filter.ActiveSince.Unix() {
+		if row.LastMeasuredActivityAt == nil {
+			row.Status = "unknown"
+		}
+		if row.LastMeasuredActivityAt != nil && lastActivityAt >= filter.ActiveSince.Unix() {
 			row.Status = StatusTrapped
 		}
 		page.Rows = append(page.Rows, row)
@@ -457,10 +546,22 @@ func (s *Store) ListAttackers(ctx context.Context, filter AttackerFilter) (Attac
 	return page, rows.Err()
 }
 
-// LatestAttacker returns the most recently seen attacker across the given
-// machines, for the "newest catch" strip. Status is left empty: liveness needs
-// a staleness threshold this query has no business inventing, and LastSeen
-// carries everything a caller needs to decide it.
+// attackerPageQuery is shared with the offline benchmark's EXPLAIN capture.
+// Sort narrow keys before joining details to reduce large-OFFSET sort width.
+// Keep the final order explicit across joins. Fragments use allowlisted sorts.
+func attackerPageQuery(where, sortColumn, direction string) string {
+	return `SELECT ` + attackerColumns + `
+		 FROM (SELECT attackers.machine_id, attackers.ip_address, attackers.` + sortColumn + ` AS sort_value
+		 FROM attackers` + where + `
+		 ORDER BY attackers.` + sortColumn + ` ` + direction + `, attackers.ip_address ASC, attackers.machine_id ASC
+		 LIMIT ? OFFSET ?) AS page_keys
+		 JOIN attackers ON attackers.machine_id=page_keys.machine_id AND attackers.ip_address=page_keys.ip_address
+		 JOIN machines ON machines.id=attackers.machine_id
+		 ORDER BY page_keys.sort_value ` + direction + `, page_keys.ip_address ASC, page_keys.machine_id ASC`
+}
+
+// LatestAttacker returns the IP with the latest measured positive counter delta.
+// Observation-only imports are excluded; status requires a separate threshold.
 func (s *Store) LatestAttacker(ctx context.Context, machineIDs []int64) (AttackerRow, bool, error) {
 	if len(machineIDs) == 0 {
 		return AttackerRow{}, false, nil
@@ -470,7 +571,8 @@ func (s *Store) LatestAttacker(ctx context.Context, machineIDs []int64) (Attacke
 		 FROM attackers
 		 JOIN machines ON machines.id = attackers.machine_id
 		 WHERE attackers.machine_id IN (`+placeholders(len(machineIDs))+`)
-		 ORDER BY attackers.last_seen DESC, attackers.ip_address ASC
+		 AND attackers.last_measured_activity_at IS NOT NULL
+ ORDER BY attackers.last_measured_activity_at DESC, attackers.ip_address ASC, attackers.machine_id ASC
 		 LIMIT 1`, int64Args(machineIDs)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return AttackerRow{}, false, nil
@@ -492,16 +594,20 @@ func scanAttackerRow(source rowScanner) (AttackerRow, int64, error) {
 		firstSeen      int64
 		lastSeen       int64
 		lastActivityAt int64
+		lastObserved   int64
+		measuredAt     sql.NullInt64
 	)
 	if err := source.Scan(&row.MachineID, &row.MachineName, &row.IPAddress,
 		&row.Country, &row.CountryCode, &row.Geohash,
 		&row.Location, &row.ISP, &latitude, &longitude,
 		&firstSeen, &lastSeen, &lastActivityAt,
-		&row.Connections, &row.TrappedSeconds); err != nil {
+		&row.Connections, &row.TrappedSeconds, &lastObserved, &measuredAt, &row.HasUndatedHistory, &row.FirstObservationKnown); err != nil {
 		return AttackerRow{}, 0, err
 	}
 	row.FirstSeen = time.Unix(firstSeen, 0).UTC()
 	row.LastSeen = time.Unix(lastSeen, 0).UTC()
+	row.LastObservedAt = time.Unix(lastObserved, 0).UTC()
+	row.LastMeasuredActivityAt = timeFromNullable(measuredAt)
 	row.Latitude = floatFromNullable(latitude)
 	row.Longitude = floatFromNullable(longitude)
 	return row, lastActivityAt, nil
@@ -509,19 +615,22 @@ func scanAttackerRow(source rowScanner) (AttackerRow, int64, error) {
 
 // GeoPoints returns the map's bubbles: attackers with a known coordinate,
 // grouped by that coordinate rounded to a city, busiest first.
-func (s *Store) GeoPoints(ctx context.Context, machineIDs []int64, since time.Time) ([]GeoPoint, error) {
+func (s *Store) GeoPoints(ctx context.Context, machineIDs []int64, since time.Time, until ...time.Time) ([]GeoPoint, error) {
+	since = MinuteBoundary(since)
+	end := optionalUntil(until)
 	if len(machineIDs) == 0 {
 		return nil, nil
 	}
 	args := append([]any{geoPointDecimalPlaces, geoPointDecimalPlaces}, int64Args(machineIDs)...)
 	// One address seen by three machines is one attacker but three sets of
 	// connections, so the head count is DISTINCT and the traffic is not. The
-	// labels are whichever non-empty value the group carries, because a bubble
-	// this small cannot straddle two countries.
+	// labels use a deterministic representative within each country identity;
+	// conflicting identities at the same coordinate remain separate bubbles.
 	query := `SELECT ROUND(latitude, ?) AS bubble_latitude,
 					 ROUND(longitude, ?) AS bubble_longitude,
-					 COALESCE(MIN(NULLIF(country, '')), ''),
-					 COALESCE(MIN(NULLIF(country_code, '')), ''),
+					 ` + countryDisplaySQL + `,
+					 MIN(` + countryCodeSQL + `),
+					 COALESCE(` + countryKeySQL + `, ''),
 					 COUNT(DISTINCT ip_address),
 					 COALESCE(SUM(connections), 0),
 					 COALESCE(SUM(trapped_seconds), 0)
@@ -529,10 +638,14 @@ func (s *Store) GeoPoints(ctx context.Context, machineIDs []int64, since time.Ti
 			  WHERE machine_id IN (` + placeholders(len(machineIDs)) + `)
 				AND latitude IS NOT NULL AND longitude IS NOT NULL`
 	if !since.IsZero() {
-		query += " AND last_seen >= ?"
+		query += " AND last_measured_activity_at >= ?"
 		args = append(args, since.Unix())
 	}
-	query += ` GROUP BY bubble_latitude, bubble_longitude
+	if !end.IsZero() {
+		query += " AND last_measured_activity_at < ?"
+		args = append(args, end.Unix())
+	}
+	query += ` GROUP BY bubble_latitude, bubble_longitude, ` + countryKeySQL + `
 			   ORDER BY SUM(connections) DESC, bubble_latitude ASC, bubble_longitude ASC
 			   LIMIT ?`
 	args = append(args, maxGeoPoints)
@@ -547,7 +660,7 @@ func (s *Store) GeoPoints(ctx context.Context, machineIDs []int64, since time.Ti
 	for rows.Next() {
 		var point GeoPoint
 		if err := rows.Scan(&point.Latitude, &point.Longitude,
-			&point.Country, &point.CountryCode,
+			&point.Country, &point.CountryCode, &point.CountryKey,
 			&point.Attackers, &point.Connections, &point.TrappedSeconds); err != nil {
 			return nil, err
 		}
@@ -558,23 +671,44 @@ func (s *Store) GeoPoints(ctx context.Context, machineIDs []int64, since time.Ti
 
 // CountryTotals is the breakdown beside the map: distinct attackers and their
 // traffic per country, busiest first.
-func (s *Store) CountryTotals(ctx context.Context, machineIDs []int64, since time.Time) ([]CountryTotal, error) {
+func (s *Store) CountryTotals(ctx context.Context, machineIDs []int64, since time.Time, observation ...bool) ([]CountryTotal, error) {
+	return s.countryTotals(ctx, machineIDs, since, time.Time{}, len(observation) > 0 && observation[0])
+}
+func (s *Store) CountryTotalsInRange(ctx context.Context, machineIDs []int64, span TimeRange, observation bool) ([]CountryTotal, error) {
+	return s.countryTotals(ctx, machineIDs, span.From, span.To, observation)
+}
+func (s *Store) countryTotals(ctx context.Context, machineIDs []int64, since, end time.Time, observation bool) ([]CountryTotal, error) {
+	since = MinuteBoundary(since)
+	end = MinuteBoundary(end)
 	if len(machineIDs) == 0 {
 		return nil, nil
 	}
 	args := int64Args(machineIDs)
-	query := `SELECT country,
-					 COALESCE(MIN(NULLIF(country_code, '')), ''),
+	query := `SELECT ` + countryDisplaySQL + `,
+					 MIN(` + countryCodeSQL + `),
+					 ` + countryKeySQL + `,
 					 COUNT(DISTINCT ip_address),
 					 COALESCE(SUM(connections), 0)
 			  FROM attackers
-			  WHERE machine_id IN (` + placeholders(len(machineIDs)) + `) AND country <> ''`
+			  WHERE machine_id IN (` + placeholders(len(machineIDs)) + `) AND (` + countryKeySQL + `) IS NOT NULL`
 	if !since.IsZero() {
-		query += " AND last_seen >= ?"
+		column := "last_measured_activity_at"
+		if observation {
+			column = "last_observed_at"
+		}
+		query += " AND " + column + " >= ?"
 		args = append(args, since.Unix())
 	}
-	query += ` GROUP BY country
-			   ORDER BY COUNT(DISTINCT ip_address) DESC, SUM(connections) DESC, country ASC
+	if !end.IsZero() {
+		column := "last_measured_activity_at"
+		if observation {
+			column = "last_observed_at"
+		}
+		query += " AND " + column + " < ?"
+		args = append(args, end.Unix())
+	}
+	query += ` GROUP BY ` + countryKeySQL + `
+			   ORDER BY COUNT(DISTINCT ip_address) DESC, SUM(connections) DESC, ` + countryKeySQL + ` ASC
 			   LIMIT ?`
 	args = append(args, maxCountryTotals)
 
@@ -587,7 +721,7 @@ func (s *Store) CountryTotals(ctx context.Context, machineIDs []int64, since tim
 	var totals []CountryTotal
 	for rows.Next() {
 		var total CountryTotal
-		if err := rows.Scan(&total.Country, &total.CountryCode, &total.Attackers, &total.Connections); err != nil {
+		if err := rows.Scan(&total.Country, &total.CountryCode, &total.CountryKey, &total.Attackers, &total.Connections); err != nil {
 			return nil, err
 		}
 		totals = append(totals, total)
@@ -642,7 +776,15 @@ func (s *Store) AttackersMissingLocation(ctx context.Context, limit int) ([]Miss
 // which is why such a row was queued for lookup at all — are written whenever
 // the resolver has them.
 func (s *Store) SetAttackerLocation(ctx context.Context, ipAddress string, location AttackerLocation) error {
-	_, err := s.database.ExecContext(ctx,
+	canonical, err := ipidentity.Canonical(ipAddress)
+	if err != nil {
+		return err
+	}
+	return setAttackerLocation(ctx, s.database, canonical, location)
+}
+
+func setAttackerLocation(ctx context.Context, writer transactionExecer, ipAddress string, location AttackerLocation) error {
+	_, err := writer.ExecContext(ctx,
 		`UPDATE attackers SET
 			country = CASE WHEN country = '' AND ? <> '' THEN ? ELSE country END,
 			country_code = CASE WHEN ? <> '' THEN ? ELSE country_code END,

@@ -348,11 +348,11 @@ func TestPollerFirstScrapeContributesNoDelta(t *testing.T) {
 	if got := states[TotalSeriesKey(MetricSentBytesTotal, "22")]; got != 4823164 {
 		t.Errorf("sent bytes state = %v, want 4823164", got)
 	}
-	if got := states[ClientSeriesKey(MetricClientTrappedTimeSeconds, "45.155.205.233")]; got != 4000.75 {
+	if got := states[RawClientSeriesKey(MetricClientTrappedTimeSeconds, "45.155.205.233", "22")]; got != 3600.5 {
 		t.Errorf("client trapped state = %v, want 4000.75", got)
 	}
-	if len(states) != 14 {
-		t.Errorf("counter states = %d, want 14 (8 aggregate series + 2 per client)", len(states))
+	if len(states) != 16 {
+		t.Errorf("counter states = %d, want 16 (8 aggregate series + 8 raw client/port series)", len(states))
 	}
 }
 
@@ -460,12 +460,17 @@ func TestPollerTreatsLowerCountersAsRestart(t *testing.T) {
 
 func TestPollerFailureKeepsHistoryIntact(t *testing.T) {
 	cases := []struct {
-		name string
-		mode string
+		name    string
+		mode    string
+		payload string
 	}{
 		{name: "http 500", mode: modeStatus},
 		{name: "timeout", mode: modeHang},
 		{name: "garbage body", mode: modeGarbage},
+		{name: "nonfinite counter", mode: modeOK, payload: "endlessh_trapped_time_seconds_total +Inf\n"},
+		{name: "NaN counter", mode: modeOK, payload: "endlessh_trapped_time_seconds_total NaN\n"},
+		{name: "negative counter", mode: modeOK, payload: "endlessh_sent_bytes_total -1\n"},
+		{name: "wrong metric type", mode: modeOK, payload: "# TYPE endlessh_trapped_time_seconds_total gauge\nendlessh_trapped_time_seconds_total 10\n"},
 	}
 
 	for _, testCase := range cases {
@@ -492,6 +497,10 @@ func TestPollerFailureKeepsHistoryIntact(t *testing.T) {
 			}
 
 			endpoint.setMode(testCase.mode)
+			if testCase.payload != "" {
+				body := []byte(testCase.payload)
+				endpoint.body.Store(&body)
+			}
 			poller.pollOne(ctx, machine)
 
 			if after := readTotals(t, dataStore, machine.ID); after != before {

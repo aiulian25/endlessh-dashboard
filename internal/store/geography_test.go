@@ -142,10 +142,10 @@ func TestCountryTotals(t *testing.T) {
 
 	want := []CountryTotal{
 		// Two distinct addresses beat one, however much traffic the one made.
-		{Country: "United States", CountryCode: "US", Attackers: 2, Connections: 15},
+		{Country: "United States", CountryCode: "US", CountryKey: "code:US", Attackers: 2, Connections: 15},
 		// One address on two machines is one attacker, and both machines' traffic.
-		{Country: "Germany", CountryCode: "DE", Attackers: 1, Connections: 130},
-		{Country: "France", CountryCode: "FR", Attackers: 1, Connections: 1},
+		{Country: "Germany", CountryCode: "DE", CountryKey: "code:DE", Attackers: 1, Connections: 130},
+		{Country: "France", CountryCode: "FR", CountryKey: "code:FR", Attackers: 1, Connections: 1},
 	}
 	if len(totals) != len(want) {
 		t.Fatalf("got %d countries (%+v), want %d", len(totals), totals, len(want))
@@ -396,7 +396,7 @@ func TestSetAttackerLocationAppliesToEveryMachine(t *testing.T) {
 		t.Error("latitude was erased by an empty update")
 	}
 
-	if err := store.SetAttackerLocation(ctx, "nobody-has-this-address", AttackerLocation{Country: "Sweden"}); err != nil {
+	if err := store.SetAttackerLocation(ctx, "192.0.2.254", AttackerLocation{Country: "Sweden"}); err != nil {
 		t.Errorf("SetAttackerLocation for an unknown address = %v, want nil", err)
 	}
 }
@@ -809,8 +809,11 @@ func TestBackfillIndexAppliesToAnExistingDatabase(t *testing.T) {
 		t.Fatalf("drop the index to simulate the older schema: %v", err)
 	}
 	if _, err := store.database.ExecContext(ctx,
-		"DELETE FROM schema_migrations WHERE version = 6"); err != nil {
+		"DELETE FROM schema_migrations WHERE version >= 6"); err != nil {
 		t.Fatalf("rewind the migration record: %v", err)
+	}
+	if _, err := store.database.ExecContext(ctx, "DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11; DROP TABLE attacker_ip_archive; DROP TABLE counter_ip_archive; DELETE FROM schema_migrations WHERE version=10; DROP INDEX idx_attackers_measured_activity; ALTER TABLE attackers DROP COLUMN last_observed_at; ALTER TABLE attackers DROP COLUMN last_measured_activity_at; ALTER TABLE attackers DROP COLUMN has_undated_history; ALTER TABLE attackers DROP COLUMN first_observation_known; ALTER TABLE machines DROP COLUMN target_generation; ALTER TABLE machines DROP COLUMN target_changed_at_ns; ALTER TABLE machines DROP COLUMN scrape_revision; ALTER TABLE machines DROP COLUMN last_metric_sample_ns; ALTER TABLE machines DROP COLUMN last_status_sample_ns; ALTER TABLE machines DROP COLUMN client_counter_policy"); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

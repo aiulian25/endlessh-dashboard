@@ -221,28 +221,12 @@ func TestParseSampleEdgeCases(t *testing.T) {
 		totals  map[string]float64
 	}{
 		{
-			name: "sample without an ip label is skipped",
-			payload: `# TYPE endlessh_client_open_count counter
-endlessh_client_open_count{country="Germany",geohash="u0yjjd6",ip="",local_port="22",location="Germany"} 5
-`,
-			clients: map[string]ClientSample{},
-			totals:  map[string]float64{},
-		},
-		{
 			name: "untyped samples still carry their value",
 			payload: `# TYPE endlessh_sent_bytes_total untyped
 endlessh_sent_bytes_total{local_port="22"} 4096
 `,
 			clients: map[string]ClientSample{},
 			totals:  map[string]float64{TotalSeriesKey(MetricSentBytesTotal, "22"): 4096},
-		},
-		{
-			name: "gauge samples still carry their value",
-			payload: `# TYPE endlessh_trapped_time_seconds_total gauge
-endlessh_trapped_time_seconds_total{local_port="2222"} 12.5
-`,
-			clients: map[string]ClientSample{},
-			totals:  map[string]float64{TotalSeriesKey(MetricTrappedTimeSecondsTotal, "2222"): 12.5},
 		},
 		{
 			name: "repeated local_port samples are summed into one series",

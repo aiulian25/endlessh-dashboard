@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"endlessh-dashboard/internal/store"
 )
@@ -186,5 +187,61 @@ func TestCreateStillResolvesTheTarget(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a machine on a blocked target was registered")
+	}
+}
+
+func TestUpdateFencesOnlyIdentityChanges(t *testing.T) {
+	for _, field := range []string{"host", "port", "path", "name", "group", "colour"} {
+		t.Run(field, func(t *testing.T) {
+			service, db := newRegistryFixture(t)
+			ctx := context.Background()
+			m, err := db.CreateMachine(ctx, store.Machine{Name: "target", Host: "192.0.2.1", Port: 2112, MetricsPath: "/metrics", Enabled: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = db.ApplyScrape(ctx, store.ScrapeDelta{MachineID: m.ID, At: time.Now(), Opens: 20, CounterStates: map[string]float64{"total:sample|22": 50}}); err != nil {
+				t.Fatal(err)
+			}
+			input := inputFor(m)
+			switch field {
+			case "host":
+				input.Host = "192.0.2.2"
+			case "port":
+				input.Port++
+			case "path":
+				input.MetricsPath = "/next"
+			case "name":
+				input.Name = "renamed"
+			case "group":
+				input.GroupLabel = "site"
+			case "colour":
+				input.Colour = "s-2"
+			}
+			updated, err := service.Update(ctx, m.ID, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := field == "host" || field == "port" || field == "path"
+			if target != (updated.TargetGeneration == 1) || target != (updated.TargetChangedAt != nil) {
+				t.Fatalf("wrong boundary metadata: %+v", updated)
+			}
+			states, err := db.LoadCounterStates(ctx, m.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target && len(states) != 0 {
+				t.Fatal("target edit kept old baselines")
+			}
+			if !target && states["total:sample|22"] != 50 {
+				t.Fatal("display edit lost baseline")
+			}
+			var opens int
+			if err = db.DB().QueryRow("SELECT opens FROM machine_totals WHERE machine_id=?", m.ID).Scan(&opens); err != nil {
+				t.Fatal(err)
+			}
+			if opens != 20 {
+				t.Fatal("edit erased lifetime history")
+			}
+		})
 	}
 }

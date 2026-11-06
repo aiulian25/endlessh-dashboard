@@ -3,7 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"endlessh-dashboard/internal/ipidentity"
+	"endlessh-dashboard/internal/metricvalue"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -13,24 +17,31 @@ const rollupBucketSeconds = 60
 // The coordinate is a pair of pointers because 0,0 is a real place: only nil
 // means the scrape produced no position for this client.
 type AttackerDelta struct {
-	IPAddress      string
-	Connections    int64
-	TrappedSeconds float64
-	Country        string
-	CountryCode    string
-	Geohash        string
-	Location       string
-	Latitude       *float64
-	Longitude      *float64
-	Active         bool
+	IPAddress        string
+	Connections      int64
+	TrappedSeconds   float64
+	Country          string
+	CountryCode      string
+	Geohash          string
+	Location         string
+	Latitude         *float64
+	Longitude        *float64
+	Active           bool
+	ImportedLifetime bool
+	FirstObservation bool
 }
 
 // ScrapeDelta is everything one successful scrape adds to the history. Values
 // are deltas, never raw counter readings, so a restart of the monitored
 // instance cannot rewrite the past.
 type ScrapeDelta struct {
-	MachineID      int64
+	MachineID        int64
+	TargetGeneration int64
+	// Revision is supplied when deriving deltas from LoadScrapeState. Explicit
+	// synchronous additive deltas may omit it; generation/enable checks still apply.
+	Revision       *int64
 	At             time.Time
+	Coverage       *ScrapeCoverage
 	Opens          int64
 	Closes         int64
 	BytesSent      int64
@@ -94,12 +105,41 @@ func saveCounterStates(ctx context.Context, transaction *sql.Tx, machineID int64
 // none of it does, so an interrupted scrape is retried in full rather than
 // applied twice.
 func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
+	var err error
+	delta, err = canonicalizeDelta(delta)
+	if err != nil {
+		return err
+	}
+	if err := validateScrapeNumbers(delta); err != nil {
+		return err
+	}
 	transaction, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer transaction.Rollback()
 
+	// Claim the generation/revision inside the same transaction as all history.
+	comparison := "<="
+	if delta.Revision != nil {
+		comparison = "<"
+	}
+	query := `UPDATE machines SET scrape_revision=scrape_revision+1,last_metric_sample_ns=?
+ WHERE id=? AND target_generation=? AND enabled=1
+ AND (last_metric_sample_ns IS NULL OR last_metric_sample_ns` + comparison + `?)
+ AND (last_status_sample_ns IS NULL OR last_status_sample_ns<=?)`
+	args := []any{delta.At.UnixNano(), delta.MachineID, delta.TargetGeneration, delta.At.UnixNano(), delta.At.UnixNano()}
+	if delta.Revision != nil {
+		query += " AND scrape_revision=?"
+		args = append(args, *delta.Revision)
+	}
+	result, err := transaction.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if err = requireOneRow(result, ErrObsoleteScrape); err != nil {
+		return err
+	}
 	bucket := delta.At.Unix() / rollupBucketSeconds * rollupBucketSeconds
 	hasAggregateChange := delta.Opens != 0 || delta.Closes != 0 || delta.BytesSent != 0 || delta.TrappedSeconds != 0
 
@@ -136,13 +176,34 @@ func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 	}
 
 	for _, attacker := range delta.Attackers {
-		if err := upsertAttacker(ctx, transaction, delta.MachineID, delta.At, attacker); err != nil {
+		if err := upsertAttacker(ctx, transaction, delta.MachineID, delta.At, attacker, delta.Revision != nil); err != nil {
 			return err
 		}
 	}
 
+	// SQLite promotes overflowing INTEGER additions to REAL. Read back affected
+	// rows before commit so a promotion, non-finite sum or poisoned old value
+	// rolls back the complete scrape, including every attacker and baseline.
+	if hasAggregateChange {
+		if err := validateStoredNumbers(transaction.QueryRowContext(ctx, "SELECT opens, closes, bytes_sent, trapped_seconds FROM machine_totals WHERE machine_id = ?", delta.MachineID), 3); err != nil {
+			return err
+		}
+		if err := validateStoredNumbers(transaction.QueryRowContext(ctx, "SELECT opens, closes, bytes_sent, trapped_seconds FROM machine_rollups WHERE machine_id = ? AND bucket = ?", delta.MachineID, bucket), 3); err != nil {
+			return err
+		}
+	}
+	for _, attacker := range delta.Attackers {
+		if err := validateStoredNumbers(transaction.QueryRowContext(ctx, "SELECT connections, trapped_seconds FROM attackers WHERE machine_id = ? AND ip_address = ?", delta.MachineID, attacker.IPAddress), 1, true); err != nil {
+			return err
+		}
+	}
 	if err := saveCounterStates(ctx, transaction, delta.MachineID, delta.CounterStates, delta.At); err != nil {
 		return err
+	}
+	if delta.Coverage != nil {
+		if err := saveScrapeCoverage(ctx, transaction, delta); err != nil {
+			return err
+		}
 	}
 	return transaction.Commit()
 }
@@ -153,7 +214,10 @@ type transactionExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-func upsertAttacker(ctx context.Context, transaction transactionExecer, machineID int64, at time.Time, attacker AttackerDelta) error {
+func upsertAttacker(ctx context.Context, transaction transactionExecer, machineID int64, at time.Time, attacker AttackerDelta, collected bool) error {
+	measured := attacker.Active || (!collected && (attacker.Connections > 0 || attacker.TrappedSeconds > 0))
+	undated := attacker.ImportedLifetime
+	firstKnown := !collected || attacker.FirstObservation
 	activityAt := at.Unix()
 	if !attacker.Active {
 		activityAt = 0
@@ -165,7 +229,9 @@ func upsertAttacker(ctx context.Context, transaction transactionExecer, machineI
 	// the local database or the online provider had already established.
 	result, err := transaction.ExecContext(ctx,
 		`UPDATE attackers SET
-			last_seen = ?,
+			last_seen = ?, last_observed_at=?,
+ last_measured_activity_at=CASE WHEN ? THEN MAX(COALESCE(last_measured_activity_at,0),?) ELSE last_measured_activity_at END,
+ has_undated_history=MAX(has_undated_history,?),
 			last_activity_at = MAX(last_activity_at, ?),
 			connections = connections + ?,
 			trapped_seconds = trapped_seconds + ?,
@@ -176,7 +242,7 @@ func upsertAttacker(ctx context.Context, transaction transactionExecer, machineI
 			latitude = CASE WHEN ? IS NOT NULL THEN ? ELSE latitude END,
 			longitude = CASE WHEN ? IS NOT NULL THEN ? ELSE longitude END
 		 WHERE machine_id = ? AND ip_address = ?`,
-		at.Unix(), activityAt,
+		at.Unix(), at.Unix(), measured, at.Unix(), undated, activityAt,
 		attacker.Connections, attacker.TrappedSeconds,
 		attacker.Country, attacker.Country,
 		attacker.CountryCode, attacker.CountryCode,
@@ -196,17 +262,115 @@ func upsertAttacker(ctx context.Context, transaction transactionExecer, machineI
 		return nil
 	}
 
+	// Retained baselines may still observe an expired IP. An unchanged or
+	// baseline-only reading must not recreate its aggregate row.
+	if collected && !measured && !undated {
+		return nil
+	}
+	var measuredAt any
+	if measured {
+		measuredAt = at.Unix()
+	}
 	if _, err := transaction.ExecContext(ctx,
 		`INSERT INTO attackers
 			(machine_id, ip_address, first_seen, last_seen, last_activity_at,
 			 connections, trapped_seconds, country, country_code, geohash, location,
-			 latitude, longitude)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 latitude, longitude,last_observed_at,last_measured_activity_at,has_undated_history,first_observation_known)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?)`,
 		machineID, attacker.IPAddress, at.Unix(), at.Unix(), activityAt,
 		attacker.Connections, attacker.TrappedSeconds,
 		attacker.Country, attacker.CountryCode, attacker.Geohash, attacker.Location,
-		attacker.Latitude, attacker.Longitude); err != nil {
+		attacker.Latitude, attacker.Longitude, at.Unix(), measuredAt, undated, firstKnown); err != nil {
 		return fmt.Errorf("insert attacker: %w", err)
 	}
 	return nil
+}
+
+func validateScrapeNumbers(delta ScrapeDelta) error {
+	for _, v := range []int64{delta.Opens, delta.Closes, delta.BytesSent} {
+		if _, err := metricvalue.AddInt(0, v); err != nil {
+			return err
+		}
+	}
+	if err := metricvalue.Validate(delta.TrappedSeconds, false); err != nil {
+		return err
+	}
+	for _, v := range delta.CounterStates {
+		if err := metricvalue.Validate(v, false); err != nil {
+			return err
+		}
+	}
+	for _, attacker := range delta.Attackers {
+		if _, err := metricvalue.AddInt(0, attacker.Connections); err != nil {
+			return err
+		}
+		if err := metricvalue.Validate(attacker.TrappedSeconds, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateStoredNumbers(row *sql.Row, integers int, allowMissing ...bool) error {
+	counts := make([]int64, integers)
+	var seconds float64
+	fields := make([]any, integers+1)
+	for i := range counts {
+		fields[i] = &counts[i]
+	}
+	fields[integers] = &seconds
+	if err := row.Scan(fields...); err != nil {
+		if len(allowMissing) > 0 && allowMissing[0] && errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("stored counter overflow or invalid history: %w", err)
+	}
+	for _, v := range counts {
+		if _, err := metricvalue.AddInt(0, v); err != nil {
+			return err
+		}
+	}
+	return metricvalue.Validate(seconds, false)
+}
+
+// ClientCounterPolicy is durable provenance for previously unseen raw series.
+func (s *Store) ClientCounterPolicy(ctx context.Context, machineID int64) (string, error) {
+	var policy string
+	err := s.database.QueryRowContext(ctx, "SELECT client_counter_policy FROM machines WHERE id = ?", machineID).Scan(&policy)
+	return policy, err
+}
+
+// Copy before normalizing so rejected input cannot rewrite the caller's data.
+func canonicalizeDelta(delta ScrapeDelta) (ScrapeDelta, error) {
+	attackers := make([]AttackerDelta, len(delta.Attackers))
+	seen := map[string]bool{}
+	for i, attacker := range delta.Attackers {
+		ip, err := ipidentity.Canonical(attacker.IPAddress)
+		if err != nil {
+			return ScrapeDelta{}, err
+		}
+		if seen[ip] {
+			return ScrapeDelta{}, fmt.Errorf("duplicate canonical attacker delta")
+		}
+		seen[ip] = true
+		attacker.IPAddress = ip
+		attackers[i] = attacker
+	}
+	states := make(map[string]float64, len(delta.CounterStates))
+	for key, value := range delta.CounterStates {
+		if strings.HasPrefix(key, "ip:v2:") {
+			normalized, _, err := ipidentity.NormalizeRawKey(key)
+			if err != nil {
+				return ScrapeDelta{}, err
+			}
+			key = normalized
+		}
+		if old, ok := states[key]; ok && old != value {
+			return ScrapeDelta{}, fmt.Errorf("conflicting canonical raw baselines")
+		}
+		states[key] = value
+	}
+	delta.Attackers = attackers
+	delta.CounterStates = states
+	return delta, nil
 }

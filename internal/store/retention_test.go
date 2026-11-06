@@ -184,7 +184,7 @@ func TestPruneClearsExpiredSessions(t *testing.T) {
 		{TokenHash: "live", UserID: user.ID, CSRFToken: "b", CreatedAt: now, ExpiresAt: now.Add(time.Hour)},
 	}
 	for _, session := range sessions {
-		if err := store.CreateSession(ctx, session); err != nil {
+		if err := store.CreateSession(ctx, session, user.PasswordHash); err != nil {
 			t.Fatalf("CreateSession(%s): %v", session.TokenHash, err)
 		}
 	}
