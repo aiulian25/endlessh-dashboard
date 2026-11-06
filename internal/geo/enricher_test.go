@@ -152,3 +152,14 @@ func TestEnricherStopsOnContextCancel(t *testing.T) {
 		t.Fatal("Run ignored a cancelled context")
 	}
 }
+
+func TestCancelledEnrichmentStartsNoStages(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e := &Enricher{}
+	e.Run(ctx)
+	e.runOnce(ctx)
+	if _, ok := e.resolve(ctx, "8.8.8.8"); ok {
+		t.Fatal("resolved after cancellation")
+	}
+}

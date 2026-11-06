@@ -3,8 +3,10 @@ package geo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -58,13 +60,12 @@ type OnlineResolver struct {
 	mutex sync.Mutex
 	// In-process only, capped at maxCacheEntries and never written to disk: an
 	// attacker's address and its resolved place already live in the database,
-	// and nothing else about the lookup is worth keeping across a restart.
+	// while durable retry eligibility is stored separately by the backfill worker.
 	cache map[string]cachedLookup
 }
 
 // cachedLookup remembers a decided answer, including "the provider does not
-// know this address", so an unresolvable address costs one request per run
-// rather than one per sweep.
+// know this address", until an eligible durable retry explicitly invalidates it.
 type cachedLookup struct {
 	location Location
 	found    bool
@@ -82,7 +83,7 @@ func NewOnlineResolver(enabled bool, endpoint string, requestsPerMinute int) *On
 		client: &http.Client{
 			Timeout: onlineRequestTimeout,
 			CheckRedirect: func(request *http.Request, via []*http.Request) error {
-				return fmt.Errorf("redirects are not followed: %s", request.URL.Redacted())
+				return errOnlineRedirect
 			},
 		},
 		// One evenly spaced request per slot is the whole rate limiter: it cannot
@@ -108,7 +109,54 @@ func (r *OnlineResolver) Endpoint() string {
 	if !r.Enabled() {
 		return ""
 	}
-	return r.endpoint
+	return OnlineProvider(r.endpoint).Origin()
+}
+
+// ProviderDescriptor contains only the destination authority and transport, never
+// credentials, paths, query parameters or fragments from the configured template.
+type ProviderDescriptor struct {
+	Host   string
+	Scheme string
+}
+
+func OnlineProvider(endpoint string) ProviderDescriptor {
+	if endpoint == "" {
+		endpoint = DefaultOnlineEndpoint
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return ProviderDescriptor{}
+	}
+	return ProviderDescriptor{Host: parsed.Host, Scheme: parsed.Scheme}
+}
+func (p ProviderDescriptor) Origin() string {
+	if p.Host == "" {
+		return ""
+	}
+	return p.Scheme + "://" + p.Host
+}
+
+var errOnlineRedirect = errors.New("redirects are not followed")
+
+// Transport errors often embed the full request URL (including redirect URLs).
+// Keep only safe destination metadata and an actionable class. Context identity
+// remains available to cancellation callers without retaining the unsafe cause.
+func (r *OnlineResolver) requestError(err error) error {
+	label := "transport error"
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("geography lookup at %s: %w", r.Endpoint(), context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("geography lookup at %s: %w", r.Endpoint(), context.DeadlineExceeded)
+	case errors.Is(err, errOnlineRedirect):
+		label = "redirects are not followed"
+	default:
+		var network net.Error
+		if errors.As(err, &network) && network.Timeout() {
+			label = "request timed out"
+		}
+	}
+	return fmt.Errorf("geography lookup at %s failed: %s", r.Endpoint(), label)
 }
 
 func (r *OnlineResolver) Close() error {
@@ -160,6 +208,14 @@ func (r *OnlineResolver) Lookup(ctx context.Context, ipAddress string) (Location
 	return located.location, true, nil
 }
 
+// Scheduled retries must consult the provider again after their durable delay,
+// rather than recycling an in-process negative/partial answer forever.
+func (r *OnlineResolver) forget(ip string) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	delete(r.cache, ip)
+}
+
 func (r *OnlineResolver) cached(ipAddress string) (cachedLookup, bool) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -193,13 +249,13 @@ func (r *OnlineResolver) request(ctx context.Context, ipAddress string) (ipAPIAn
 	target := strings.Replace(r.endpoint, OnlineIPPlaceholder, url.PathEscape(ipAddress), 1)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return ipAPIAnswer{}, fmt.Errorf("build lookup request: %w", err)
+		return ipAPIAnswer{}, fmt.Errorf("build geography lookup request: invalid endpoint")
 	}
 	request.Header.Set("User-Agent", onlineUserAgent)
 
 	response, err := r.client.Do(request)
 	if err != nil {
-		return ipAPIAnswer{}, fmt.Errorf("geography lookup failed: %w", err)
+		return ipAPIAnswer{}, r.requestError(err)
 	}
 	defer response.Body.Close()
 
@@ -207,12 +263,12 @@ func (r *OnlineResolver) request(ctx context.Context, ipAddress string) (ipAPIAn
 		return ipAPIAnswer{}, fmt.Errorf("geography provider is rate limiting this host; lower the configured requests per minute")
 	}
 	if response.StatusCode != http.StatusOK {
-		return ipAPIAnswer{}, fmt.Errorf("geography provider returned %s", response.Status)
+		return ipAPIAnswer{}, fmt.Errorf("geography provider returned HTTP %d", response.StatusCode)
 	}
 
 	var answer ipAPIAnswer
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxOnlineResponseBytes)).Decode(&answer); err != nil {
-		return ipAPIAnswer{}, fmt.Errorf("geography provider returned an unreadable answer: %w", err)
+		return ipAPIAnswer{}, fmt.Errorf("geography provider returned an unreadable JSON answer")
 	}
 	return answer, nil
 }

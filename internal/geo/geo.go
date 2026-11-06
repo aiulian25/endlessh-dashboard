@@ -7,8 +7,12 @@
 package geo
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/oschwald/geoip2-golang"
@@ -35,8 +39,9 @@ type Location struct {
 }
 
 type Resolver struct {
-	reader *geoip2.Reader
-	path   string
+	reader     *geoip2.Reader
+	path       string
+	generation string
 }
 
 // Open returns a disabled resolver when path is empty, so callers never need a
@@ -45,11 +50,37 @@ func Open(path string) (*Resolver, error) {
 	if strings.TrimSpace(path) == "" {
 		return &Resolver{}, nil
 	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	generation, err := databaseFingerprint(file)
+	if err != nil {
+		return nil, err
+	}
 	reader, err := geoip2.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open GeoIP database %s: %w", path, err)
 	}
-	return &Resolver{reader: reader, path: path}, nil
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		reader.Close()
+		return nil, fmt.Errorf("GeoIP database changed while opening; retry startup")
+	}
+	return &Resolver{reader: reader, path: path, generation: generation}, nil
+}
+
+func databaseFingerprint(input io.Reader) (string, error) {
+	digest := sha256.New()
+	if _, err := io.Copy(digest, input); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func (r *Resolver) Enabled() bool {
@@ -68,6 +99,15 @@ func (r *Resolver) Path() string {
 		return ""
 	}
 	return r.path
+}
+
+// Generation identifies loaded database content across restarts. Replacing a
+// mounted database takes effect when it is reopened, as before.
+func (r *Resolver) Generation() string {
+	if !r.Enabled() {
+		return "disabled"
+	}
+	return r.generation
 }
 
 // Lookup returns the country and a human-readable location, or false when the
