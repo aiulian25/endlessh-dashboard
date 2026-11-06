@@ -2,7 +2,6 @@ BINARY          := endlessh-dashboard
 CMD_PACKAGE     := ./cmd/endlessh-dashboard
 BIN_DIR         := bin
 LOCAL_DATA_DIR  := ./data
-E2E_COMPOSE     := e2e/docker-compose.e2e.yml
 
 VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 IMAGE           ?= $(BINARY):$(VERSION)
@@ -28,7 +27,7 @@ build: ## Build the static binary into ./bin
 		$(CMD_PACKAGE)
 
 .PHONY: run
-run: ## Run locally against ./data (reads .env if the app finds one)
+run: ## Run locally against ./data using the process environment
 	@mkdir -p $(LOCAL_DATA_DIR)
 	DATA_DIR=$(LOCAL_DATA_DIR) go run $(CMD_PACKAGE)
 
@@ -62,7 +61,7 @@ docker-build: ## Build the container image
 
 .PHONY: docker-run
 docker-run: ## Run the image with the same hardening as docker-compose.yml
-	docker run --rm \
+	docker run --rm --stop-timeout 20 \
 		--name $(BINARY) \
 		--env-file .env \
 		-p 18222:18222 \
@@ -74,17 +73,8 @@ docker-run: ## Run the image with the same hardening as docker-compose.yml
 		$(IMAGE)
 
 .PHONY: e2e
-e2e: docker-build ## Run the end-to-end smoke test against a real endlessh-go
-	# The suite drives a live stack, so the target brings it up, runs the tests,
-	# and tears it down again whatever the outcome. E2E=1 is what actually
-	# enables the suite: without it every test skips and this target would
-	# report success having asserted nothing.
-	docker compose -f $(E2E_COMPOSE) up --build -d
-	@E2E=1 IMAGE=$(IMAGE) E2E_COMPOSE=$(E2E_COMPOSE) \
-		go test -count=1 -v -tags e2e -timeout 10m ./e2e/...; \
-	status=$$?; \
-	docker compose -f $(E2E_COMPOSE) down -v; \
-	exit $$status
+e2e: ## Run the isolated real-exporter smoke test and verify cleanup
+	@./e2e/run.sh
 
 .PHONY: clean
 clean: ## Remove build and test output

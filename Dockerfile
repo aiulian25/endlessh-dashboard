@@ -7,10 +7,10 @@
 # now produces the same bits and a compromised tag cannot silently change the
 # base.
 #
-# The digests below are real and were resolved on 2026-08-24. Refresh them
-# whenever you bump the Go version or pick up a distroless security update:
+# The builder digest was resolved on 2026-11-05; the runtime digest was resolved
+# on 2026-08-24. Refresh the relevant pin when updating Go or distroless:
 #
-#   docker buildx imagetools inspect golang:1.26-bookworm \
+#   docker buildx imagetools inspect golang:1.26.10-bookworm \
 #     --format '{{.Manifest.Digest}}'
 #   docker buildx imagetools inspect gcr.io/distroless/static-debian12:nonroot \
 #     --format '{{.Manifest.Digest}}'
@@ -26,14 +26,17 @@
 # through QEMU to run a Go toolchain on it. Nothing here is arch-specific —
 # CGO is off and the SQLite driver is pure Go — so the cross-built binary is
 # the same binary, produced in a fraction of the time.
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm@sha256:6ef6e30f0ea5c384f6d111cf856e024e3086bbdcb1779da3f3b3fbba0aea53d2 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-bookworm@sha256:e0c50aecba3a2edfab18924d493cd9210b73c4746fc5fd5b3bb46e0ec7f0465a AS builder
+
+# Use the compiler from the pinned builder, never an implicitly downloaded one.
+ENV GOTOOLCHAIN=local
 
 WORKDIR /src
 
 # Module download is its own layer, invalidated only when go.mod/go.sum change.
 # Ordinary source edits reuse the cached module tree.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go version && go mod download
 
 COPY . .
 
@@ -47,7 +50,7 @@ ARG VERSION=dev
 ARG TARGETARCH
 
 # CGO_ENABLED=0 is what makes the binary static, which is what makes the
-# distroless-static runtime stage (and the sub-30MB image) possible.
+# distroless-static runtime stage possible. CI gates local image bytes separately.
 # -trimpath removes local filesystem paths; -s -w drop the symbol table and
 # DWARF debug data, which is most of the size saving.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \

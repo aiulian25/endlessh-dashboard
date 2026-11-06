@@ -1,8 +1,6 @@
 module endlessh-dashboard
 
-go 1.26.5
-
-toolchain go1.26.6
+go 1.26.10
 
 require (
 	github.com/oschwald/geoip2-golang v1.13.0

@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -289,5 +290,50 @@ func TestLogLevelIsNamedNotNumbered(t *testing.T) {
 				t.Errorf("error = %q, want it to name %s", err, EnvLogLevel)
 			}
 		})
+	}
+}
+
+func TestScrapeConcurrencyDefaultAndBounds(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  int
+		valid bool
+	}{{"", 4, true}, {"1", 1, true}, {"32", 32, true}, {"0", 0, false}, {"33", 0, false}, {"-1", 0, false}, {"many", 0, false}} {
+		t.Run(c.value, func(t *testing.T) {
+			t.Setenv(EnvScrapeConcurrency, c.value)
+			got, err := Load()
+			if !c.valid {
+				if err == nil || !strings.Contains(err.Error(), EnvScrapeConcurrency) {
+					t.Fatal("invalid concurrency accepted", got, err)
+				}
+				return
+			}
+			if err != nil || got.ScrapeConcurrency != c.want {
+				t.Fatal(got, err)
+			}
+		})
+	}
+}
+
+func TestOnlineEndpointValidationDoesNotExposeSecrets(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://" + url.UserPassword("fictional-user", "fictional-password").String() + "@provider.internal/path-secret/%zz/{ip}?key=query-secret",
+		"ftp://" + url.UserPassword("fictional-user", "fictional-password").String() + "@provider.internal/path-secret/{ip}?key=query-secret",
+		"https://" + url.UserPassword("fictional-user", "fictional-password").String() + "@provider.internal/path-secret?key=query-secret",
+		"https:///path-secret/{ip}?key=query-secret",
+	} {
+		t.Setenv(EnvGeoIPOnlineEndpoint, endpoint)
+		_, err := onlineEndpointValue(EnvGeoIPOnlineEndpoint, geo.DefaultOnlineEndpoint)
+		if err == nil {
+			t.Fatal("invalid endpoint accepted")
+		}
+		for _, secret := range []string{"fictional-user", "fictional-password", "path-secret", "query-secret"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("secret exposed: %v", err)
+			}
+		}
+		if !strings.Contains(err.Error(), EnvGeoIPOnlineEndpoint) {
+			t.Fatalf("missing configuration key: %v", err)
+		}
 	}
 }

@@ -3,12 +3,19 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: Run the isolated real-exporter smoke test
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26"
+  GO_VERSION: "1.26.10"
+  GOTOOLCHAIN: local
   BINARY: endlessh-dashboard
 
 jobs:
@@ -45,6 +52,12 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the binary compiler
+        run: |
+          BUILD_INFO=$(go version -m "bin/${BINARY}")
+          printf '%s\n' "$BUILD_INFO"
+          test "$(printf '%s\n' "$BUILD_INFO" | awk 'NR == 1 {print $NF}')" = "go${GO_VERSION}"
+
       - name: Test
         run: go test ./... -race
 
@@ -71,20 +84,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # NOTE: the Dockerfile pins both base images by digest. Until those
-      # placeholder digests are replaced with real ones, this job fails at the
-      # pull step. See the comment block at the top of the Dockerfile.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Both base images are pinned by digest in the Dockerfile.
       - name: Build image
         run: docker build --build-arg VERSION="${GITHUB_SHA}" -t "${BINARY}:ci" .
 
-      # "image under 30MB" is a stated acceptance criterion, so it is a gate,
-      # not a report.
-      - name: Assert image is under 30MB
+      - name: Verify the image binary compiler
+        run: |
+          container_id=
+          trap 'if [ -n "$container_id" ]; then docker rm -v "$container_id"; fi' EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          container_id=$(docker create --network none --tmpfs /data "${BINARY}:ci")
+          mkdir -p bin
+          docker cp "${container_id}:/usr/local/bin/${BINARY}" "bin/${BINARY}-image"
+          docker rm -v "$container_id"
+          container_id=
+          BUILD_INFO=$(go version -m "bin/${BINARY}-image")
+          printf '%s\n' "$BUILD_INFO"
+          test "$(printf '%s\n' "$BUILD_INFO" | awk 'NR == 1 {print $NF}')" = "go${GO_VERSION}"
+
+      # Gate local image bytes at 30 MiB; this is not a compressed registry
+      # transfer size or a measured release footprint.
+      - name: Assert image is under 30 MiB
         run: |
           MAX_BYTES=$((30 * 1024 * 1024))
           SIZE_BYTES=$(docker image inspect "${BINARY}:ci" --format '{{.Size}}')
-          echo "image size: ${SIZE_BYTES} bytes (limit ${MAX_BYTES})"
+          echo "image size: ${SIZE_BYTES} bytes (limit ${MAX_BYTES} bytes / 30 MiB)"
           if [ "${SIZE_BYTES}" -ge "${MAX_BYTES}" ]; then
-            echo "::error::image is ${SIZE_BYTES} bytes, over the 30MB limit"
+            echo "::error::image is ${SIZE_BYTES} bytes, over the 30 MiB limit"
             exit 1
           fi
+
+  e2e:
+    name: Opt-in real exporter smoke test
+    if: github.event_name == 'workflow_dispatch' && inputs.run_e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Run isolated smoke stack
+        env:
+          E2E_ARTIFACT_DIR: ${{ runner.temp }}/endlessh-e2e
+        run: make e2e
+      - name: Preserve logs and exporter fixture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: endlessh-e2e-logs
+          path: ${{ runner.temp }}/endlessh-e2e
+          if-no-files-found: warn

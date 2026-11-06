@@ -14,6 +14,8 @@ services:
     image: ghcr.io/aiulian25/endlessh-dashboard:latest
     container_name: endlessh-dashboard
     restart: unless-stopped
+    # Allow the application's 15-second shutdown budget to finish.
+    stop_grace_period: 20s
 
     # All configuration is environment-driven. See .env.example for every
     # variable and what it does.

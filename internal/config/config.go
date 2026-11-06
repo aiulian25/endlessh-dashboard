@@ -20,6 +20,7 @@ const (
 	EnvDataDirectory        = "DATA_DIR"
 	EnvScrapeInterval       = "SCRAPE_INTERVAL"
 	EnvScrapeTimeout        = "SCRAPE_TIMEOUT"
+	EnvScrapeConcurrency    = "SCRAPE_CONCURRENCY"
 	EnvRetentionDays        = "RETENTION_DAYS"
 	EnvAdminUsername        = "ADMIN_USERNAME"
 	EnvAdminPassword        = "ADMIN_PASSWORD"
@@ -37,14 +38,16 @@ const (
 )
 
 const (
-	defaultListenAddress  = ":18222"
-	defaultDataDirectory  = "/data"
-	defaultScrapeInterval = 15 * time.Second
-	defaultScrapeTimeout  = 5 * time.Second
-	defaultRetentionDays  = 90
-	defaultAdminUsername  = "admin"
-	defaultLogLevel       = slog.LevelInfo
-	defaultBackupKeepLast = 7
+	defaultListenAddress     = ":18222"
+	defaultDataDirectory     = "/data"
+	defaultScrapeInterval    = 15 * time.Second
+	defaultScrapeTimeout     = 5 * time.Second
+	defaultScrapeConcurrency = 4
+	maxScrapeConcurrency     = 32
+	defaultRetentionDays     = 90
+	defaultAdminUsername     = "admin"
+	defaultLogLevel          = slog.LevelInfo
+	defaultBackupKeepLast    = 7
 
 	databaseFileName = "endlessh.db"
 	backupDirName    = "backups"
@@ -78,7 +81,7 @@ type SecureCookieMode string
 
 const (
 	// SecureCookieAuto marks cookies Secure when the request arrived over TLS,
-	// directly or through a proxy that set X-Forwarded-Proto.
+	// directly or through a configured trusted proxy that set X-Forwarded-Proto.
 	SecureCookieAuto SecureCookieMode = "auto"
 	SecureCookieOn   SecureCookieMode = "on"
 	SecureCookieOff  SecureCookieMode = "off"
@@ -96,6 +99,7 @@ type Config struct {
 	DataDirectory     string
 	ScrapeInterval    time.Duration
 	ScrapeTimeout     time.Duration
+	ScrapeConcurrency int
 	RetentionDays     int
 	AdminUsername     string
 	SessionLifetime   time.Duration
@@ -173,6 +177,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%s must be at least %s", EnvScrapeTimeout, minScrapeTimeout)
 	}
 	config.ScrapeTimeout = scrapeTimeout
+	concurrency, err := intValue(EnvScrapeConcurrency, defaultScrapeConcurrency)
+	if err != nil {
+		return nil, err
+	}
+	if concurrency < 1 || concurrency > maxScrapeConcurrency {
+		return nil, fmt.Errorf("%s must be between 1 and %d", EnvScrapeConcurrency, maxScrapeConcurrency)
+	}
+	config.ScrapeConcurrency = concurrency
 
 	retentionDays, err := intValue(EnvRetentionDays, defaultRetentionDays)
 	if err != nil {
@@ -346,14 +358,17 @@ func onlineEndpointValue(name, fallback string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("%s: %q is not a URL", name, raw)
+		return "", fmt.Errorf("%s: invalid URL", name)
 	}
 	if parsed.Scheme != httpScheme && parsed.Scheme != httpsScheme {
-		return "", fmt.Errorf("%s: %q must be an http:// or https:// URL", name, raw)
+		return "", fmt.Errorf("%s: must be an http:// or https:// URL", name)
+	}
+	if parsed.Hostname() == "" {
+		return "", fmt.Errorf("%s: URL must have a host", name)
 	}
 	if !strings.Contains(raw, geo.OnlineIPPlaceholder) {
-		return "", fmt.Errorf("%s: %q must contain %s where the address goes",
-			name, raw, geo.OnlineIPPlaceholder)
+		return "", fmt.Errorf("%s: must contain %s where the address goes",
+			name, geo.OnlineIPPlaceholder)
 	}
 	return raw, nil
 }
