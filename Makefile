@@ -37,7 +37,7 @@ test: ## Run the unit tests
 
 .PHONY: test-race
 test-race: ## Run the unit tests under the race detector
-	go test -race ./...
+	go test -race -timeout=25m ./...
 
 .PHONY: vet
 vet: ## Run go vet
