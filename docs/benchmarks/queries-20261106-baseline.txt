@@ -1,0 +1,220 @@
+FIX-021 query measurements, 2026-11-06
+Base HEAD: 56723b8b6cfdd0f44da036bac5bdad4a259c42d2; working tree includes prior FIX-001 through FIX-020.
+Go 1.26.10 / linux amd64; modernc SQLite 3.53.3.
+Intel Core i7-10750H, GOMAXPROCS=4. /tmp is tmpfs.
+No OS cache eviction, physical disk durability, HTTP overhead, or production data.
+20 measured samples per published case; p50/p95 are observed nearest-rank quantiles.
+The full baseline uses the task-start wide-row page query (before explicit machine-ID tie-breaking).
+The final narrow-key trial showed a substantial million-row deep-page benefit with smaller-dataset tradeoffs and was retained.
+Production adds complete machine-ID tie-breaking. Reproduce wide-row comparison using DASHBOARD_BENCH_WIDE_PAGE=1 with the final source.
+Fixture setup excluded; validation ran during one setup interval. Timed benchmark runs were serial.
+
+Baseline command (local Go 1.26.10):
+GOMAXPROCS=4 go test ./internal/store -run "^$" -bench "^BenchmarkDashboardQueries$" -benchtime=20x -count=1 -v -timeout=45m
+
+goos: linux
+goarch: amd64
+pkg: endlessh-dashboard/internal/store
+cpu: Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz
+BenchmarkDashboardQueries
+    queries_benchmark_test.go:20: runtime=go1.26.10 GOOS=linux GOARCH=amd64 GOMAXPROCS=4
+BenchmarkDashboardQueries/rows=10000/ipindex=false
+    queries_benchmark_test.go:26: seed-ms=259.2
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=2547712 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SCAN attackers USING INDEX idx_attackers_measured_activity
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=10000/ipindex=false/overview-24h
+BenchmarkDashboardQueries/rows=10000/ipindex=false/overview-24h-4         	      20	  26677049 ns/op	        30.63 first-ms	        26.55 p50-ms	        28.54 p95-ms	    8947 B/op	      98 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/countries-24h
+BenchmarkDashboardQueries/rows=10000/ipindex=false/countries-24h-4        	      20	  14999881 ns/op	        16.03 first-ms	        15.02 p50-ms	        15.62 p95-ms	   13048 B/op	      45 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/page-first-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=false/page-first-90d-4       	      20	  17450450 ns/op	        18.20 first-ms	        17.58 p50-ms	        18.10 p95-ms	   87132 B/op	    1380 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/page-deep-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=false/page-deep-90d-4        	      20	  46431960 ns/op	        45.54 first-ms	        44.24 p50-ms	        57.54 p95-ms	   87308 B/op	    1412 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/enrichment-due
+BenchmarkDashboardQueries/rows=10000/ipindex=false/enrichment-due-4       	      20	   5902187 ns/op	         7.307 first-ms	         5.922 p50-ms	         6.321 p95-ms	   16624 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/enrichment-update
+BenchmarkDashboardQueries/rows=10000/ipindex=false/enrichment-update-4    	      20	  10720521 ns/op	        10.41 first-ms	        10.56 p50-ms	        11.98 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/keyset-probe
+BenchmarkDashboardQueries/rows=10000/ipindex=false/keyset-probe-4         	      20	   9300353 ns/op	         8.985 p50-ms	        10.84 p95-ms	    3592 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/scrape100/new=false
+BenchmarkDashboardQueries/rows=10000/ipindex=false/scrape100/new=false-4  	      20	  10431823 ns/op	        10.02 p50-ms	        13.20 p95-ms	   3094120 wal-file-growth-B	  280242 B/op	    4921 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/scrape100/new=true
+BenchmarkDashboardQueries/rows=10000/ipindex=false/scrape100/new=true-4   	      20	  14036246 ns/op	        13.95 p50-ms	        14.91 p95-ms	     86520 wal-file-growth-B	  410648 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=false/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=10000/ipindex=false/concurrent-overview-scrape100-4         	      20	  52046609 ns/op	        50.93 p50-ms	        56.78 p95-ms	        15.34 write-p50-ms	        21.63 write-p95-ms	        61.00 writes	  847922 B/op	   14905 allocs/op
+    queries_benchmark_test.go:172: final DB=3125248 WAL=0
+BenchmarkDashboardQueries/rows=10000/ipindex=true
+    queries_benchmark_test.go:26: seed-ms=236.7
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=2781184 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=10000/ipindex=true/overview-24h
+BenchmarkDashboardQueries/rows=10000/ipindex=true/overview-24h-4                           	      20	  25921693 ns/op	        26.67 first-ms	        25.78 p50-ms	        26.99 p95-ms	    8944 B/op	      98 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/countries-24h
+BenchmarkDashboardQueries/rows=10000/ipindex=true/countries-24h-4                          	      20	  16700390 ns/op	        16.63 first-ms	        16.36 p50-ms	        17.54 p95-ms	   13048 B/op	      45 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-first-90d-4                         	      20	  19133050 ns/op	        20.10 first-ms	        18.85 p50-ms	        20.31 p95-ms	   87134 B/op	    1380 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-deep-90d-4                          	      20	  47327774 ns/op	        46.79 first-ms	        46.97 p50-ms	        48.85 p95-ms	   87296 B/op	    1412 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/enrichment-due
+BenchmarkDashboardQueries/rows=10000/ipindex=true/enrichment-due-4                         	      20	   6133486 ns/op	         7.353 first-ms	         5.989 p50-ms	         6.722 p95-ms	   16624 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/enrichment-update
+BenchmarkDashboardQueries/rows=10000/ipindex=true/enrichment-update-4                      	      20	     88396 ns/op	         0.2263 first-ms	         0.06784 p50-ms	         0.1658 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/keyset-probe
+BenchmarkDashboardQueries/rows=10000/ipindex=true/keyset-probe-4                           	      20	   9391091 ns/op	         9.312 p50-ms	        10.07 p95-ms	    3592 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/scrape100/new=false
+BenchmarkDashboardQueries/rows=10000/ipindex=true/scrape100/new=false-4                    	      20	  10146433 ns/op	        10.20 p50-ms	        10.62 p95-ms	   3094120 wal-file-growth-B	  278617 B/op	    4917 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/scrape100/new=true
+BenchmarkDashboardQueries/rows=10000/ipindex=true/scrape100/new=true-4                     	      20	  15516860 ns/op	        14.82 p50-ms	        19.77 p95-ms	     37080 wal-file-growth-B	  410628 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=10000/ipindex=true/concurrent-overview-scrape100-4          	      20	  53384990 ns/op	        51.53 p50-ms	        61.68 p95-ms	        15.84 write-p50-ms	        24.70 write-p95-ms	        60.00 writes	  844153 B/op	   14866 allocs/op
+    queries_benchmark_test.go:172: final DB=3420160 WAL=0
+BenchmarkDashboardQueries/rows=100000/ipindex=false
+    queries_benchmark_test.go:26: seed-ms=3541.9
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=25751552 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SCAN attackers USING INDEX idx_attackers_measured_activity
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=100000/ipindex=false/overview-24h
+BenchmarkDashboardQueries/rows=100000/ipindex=false/overview-24h-4                         	      20	 311316564 ns/op	       296.9 first-ms	       296.6 p50-ms	       339.0 p95-ms	    8953 B/op	      99 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/countries-24h
+BenchmarkDashboardQueries/rows=100000/ipindex=false/countries-24h-4                        	      20	 157714456 ns/op	       158.0 first-ms	       156.6 p50-ms	       162.4 p95-ms	   13072 B/op	      49 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/page-first-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=false/page-first-90d-4                       	      20	 204171213 ns/op	       224.0 first-ms	       203.0 p50-ms	       208.6 p95-ms	   84641 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/page-deep-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=false/page-deep-90d-4                        	      20	 615367053 ns/op	       598.6 first-ms	       606.7 p50-ms	       682.2 p95-ms	   88258 B/op	    1492 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/enrichment-due
+BenchmarkDashboardQueries/rows=100000/ipindex=false/enrichment-due-4                       	      20	  71134319 ns/op	        71.45 first-ms	        69.10 p50-ms	        78.31 p95-ms	   16624 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/enrichment-update
+BenchmarkDashboardQueries/rows=100000/ipindex=false/enrichment-update-4                    	      20	 211679333 ns/op	       232.0 first-ms	       200.1 p50-ms	       280.9 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/keyset-probe
+BenchmarkDashboardQueries/rows=100000/ipindex=false/keyset-probe-4                         	      20	 136968119 ns/op	       136.3 p50-ms	       146.7 p95-ms	    3592 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/scrape100/new=false
+BenchmarkDashboardQueries/rows=100000/ipindex=false/scrape100/new=false-4                  	      20	  13103918 ns/op	        11.47 p50-ms	        18.96 p95-ms	   2822200 wal-file-growth-B	  279889 B/op	    4922 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/scrape100/new=true
+BenchmarkDashboardQueries/rows=100000/ipindex=false/scrape100/new=true-4                   	      20	  15483853 ns/op	        15.26 p50-ms	        16.50 p95-ms	         0 wal-file-growth-B	  410619 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=false/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=100000/ipindex=false/concurrent-overview-scrape100-4        	      20	 320076280 ns/op	       316.7 p50-ms	       344.5 p95-ms	        10.64 write-p50-ms	        15.90 write-p95-ms	       524.0 writes	 7299939 B/op	  130829 allocs/op
+    queries_benchmark_test.go:172: final DB=26316800 WAL=0
+BenchmarkDashboardQueries/rows=100000/ipindex=true
+    queries_benchmark_test.go:26: seed-ms=3617.1
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=28188672 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=100000/ipindex=true/overview-24h
+BenchmarkDashboardQueries/rows=100000/ipindex=true/overview-24h-4                          	      20	 310029783 ns/op	       327.1 first-ms	       306.8 p50-ms	       334.8 p95-ms	    8953 B/op	      99 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/countries-24h
+BenchmarkDashboardQueries/rows=100000/ipindex=true/countries-24h-4                         	      20	 157352944 ns/op	       161.4 first-ms	       155.8 p50-ms	       164.2 p95-ms	   13072 B/op	      49 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-first-90d-4                        	      20	 198389856 ns/op	       188.7 first-ms	       188.9 p50-ms	       214.2 p95-ms	   84640 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-deep-90d-4                         	      20	 636998326 ns/op	       602.1 first-ms	       626.4 p50-ms	       748.1 p95-ms	   88258 B/op	    1492 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/enrichment-due
+BenchmarkDashboardQueries/rows=100000/ipindex=true/enrichment-due-4                        	      20	  79876932 ns/op	        78.18 first-ms	        77.40 p50-ms	        90.45 p95-ms	   16624 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/enrichment-update
+BenchmarkDashboardQueries/rows=100000/ipindex=true/enrichment-update-4                     	      20	     83193 ns/op	         0.2173 first-ms	         0.07587 p50-ms	         0.1169 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/keyset-probe
+BenchmarkDashboardQueries/rows=100000/ipindex=true/keyset-probe-4                          	      20	 149827072 ns/op	       146.9 p50-ms	       168.4 p95-ms	    3592 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/scrape100/new=false
+BenchmarkDashboardQueries/rows=100000/ipindex=true/scrape100/new=false-4                   	      20	  11728428 ns/op	        11.04 p50-ms	        15.20 p95-ms	   2822200 wal-file-growth-B	  278628 B/op	    4917 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/scrape100/new=true
+BenchmarkDashboardQueries/rows=100000/ipindex=true/scrape100/new=true-4                    	      20	  17173073 ns/op	        16.60 p50-ms	        19.32 p95-ms	         0 wal-file-growth-B	  410630 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=100000/ipindex=true/concurrent-overview-scrape100-4         	      20	 336098702 ns/op	       330.3 p50-ms	       379.6 p95-ms	        11.15 write-p50-ms	        16.33 write-p95-ms	       524.0 writes	 7300602 B/op	  130828 allocs/op
+    queries_benchmark_test.go:172: final DB=28811264 WAL=0
+BenchmarkDashboardQueries/rows=1000000/ipindex=false
+    queries_benchmark_test.go:26: seed-ms=77004.5
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=265658368 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SCAN attackers USING INDEX idx_attackers_measured_activity
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/overview-24h
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/overview-24h-4                        	      20	4572869471 ns/op	      4416 first-ms	      4527 p50-ms	      4831 p95-ms	    8961 B/op	     100 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/countries-24h
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/countries-24h-4                       	      20	2034983606 ns/op	      1956 first-ms	      2040 p50-ms	      2207 p95-ms	   13072 B/op	      49 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/page-first-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/page-first-90d-4                      	      20	3154567655 ns/op	      3090 first-ms	      3079 p50-ms	      3448 p95-ms	   85020 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/page-deep-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/page-deep-90d-4                       	      20	11041588084 ns/op	     13584 first-ms	     11381 p50-ms	     12043 p95-ms	   88640 B/op	    1492 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/enrichment-due
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/enrichment-due-4                      	      20	1177861915 ns/op	      1192 first-ms	      1178 p50-ms	      1244 p95-ms	   16626 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/enrichment-update
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/enrichment-update-4                   	      20	4534458202 ns/op	      4849 first-ms	      4537 p50-ms	      4838 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/keyset-probe
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/keyset-probe-4                        	      20	2369036415 ns/op	      2339 p50-ms	      2687 p95-ms	    3968 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/scrape100/new=false
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/scrape100/new=false-4                 	      20	  18695126 ns/op	        17.65 p50-ms	        26.43 p95-ms	   1965240 wal-file-growth-B	  278643 B/op	    4917 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/scrape100/new=true
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/scrape100/new=true-4                  	      20	  22187513 ns/op	        21.55 p50-ms	        25.19 p95-ms	         0 wal-file-growth-B	  410628 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=1000000/ipindex=false/concurrent-overview-scrape100-4       	      20	4849042015 ns/op	      4845 p50-ms	      5784 p95-ms	        13.37 write-p50-ms	        23.19 write-p95-ms	      6081 writes	84735915 B/op	 1525631 allocs/op
+    queries_benchmark_test.go:172: final DB=266244096 WAL=0
+BenchmarkDashboardQueries/rows=1000000/ipindex=true
+    queries_benchmark_test.go:26: seed-ms=89413.0
+    queries_benchmark_test.go:33: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=291057664 WAL=0
+    queries_benchmark_test.go:36: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:37: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:37: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:38: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:38: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:39: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:39: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:39: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/overview-24h
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/overview-24h-4                         	      20	4702519893 ns/op	      4182 first-ms	      4770 p50-ms	      5675 p95-ms	    8962 B/op	     100 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/countries-24h
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/countries-24h-4                        	      20	2047987273 ns/op	      2497 first-ms	      2024 p50-ms	      2494 p95-ms	   13072 B/op	      49 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-first-90d-4                       	      20	2401146677 ns/op	      2115 first-ms	      2335 p50-ms	      2723 p95-ms	   85017 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-deep-90d-4                        	      20	10679889639 ns/op	     11405 first-ms	     10867 p50-ms	     12363 p95-ms	   88640 B/op	    1492 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/enrichment-due
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/enrichment-due-4                       	      20	1289771398 ns/op	      1160 first-ms	      1298 p50-ms	      1650 p95-ms	   16624 B/op	     330 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/enrichment-update
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/enrichment-update-4                    	      20	    113530 ns/op	         0.3696 first-ms	         0.1013 p50-ms	         0.1569 p95-ms	    1224 B/op	      18 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/keyset-probe
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/keyset-probe-4                         	      20	1821691113 ns/op	      1757 p50-ms	      2333 p95-ms	    3968 B/op	     222 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/scrape100/new=false
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/scrape100/new=false-4                  	      20	  17039121 ns/op	        15.26 p50-ms	        23.73 p95-ms	   1965240 wal-file-growth-B	  278615 B/op	    4916 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/scrape100/new=true
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/scrape100/new=true-4                   	      20	  18878007 ns/op	        18.80 p50-ms	        21.65 p95-ms	         0 wal-file-growth-B	  410619 B/op	    7017 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/concurrent-overview-scrape100
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/concurrent-overview-scrape100-4        	      20	5116720923 ns/op	      4835 p50-ms	      6459 p95-ms	        14.18 write-p50-ms	        26.03 write-p95-ms	      6067 writes	84538565 B/op	 1522091 allocs/op
+    queries_benchmark_test.go:172: final DB=291700736 WAL=0
+PASS
+ok  	endlessh-dashboard/internal/store	1679.880s

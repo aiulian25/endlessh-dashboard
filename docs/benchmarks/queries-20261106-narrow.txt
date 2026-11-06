@@ -1,0 +1,96 @@
+FIX-021 query measurements, 2026-11-06
+Base HEAD: 56723b8b6cfdd0f44da036bac5bdad4a259c42d2; working tree includes prior FIX-001 through FIX-020.
+Go 1.26.10 / linux amd64; modernc SQLite 3.53.3.
+Intel Core i7-10750H, GOMAXPROCS=4. /tmp is tmpfs.
+No OS cache eviction, physical disk durability, HTTP overhead, or production data.
+20 measured samples per published case; p50/p95 are observed nearest-rank quantiles.
+The full baseline uses the task-start wide-row page query (before explicit machine-ID tie-breaking).
+The final narrow-key trial showed a substantial million-row deep-page benefit with smaller-dataset tradeoffs and was retained.
+Production adds complete machine-ID tie-breaking. Reproduce wide-row comparison using DASHBOARD_BENCH_WIDE_PAGE=1 with the final source.
+Fixture setup excluded; validation ran during one setup interval. Timed benchmark runs were serial.
+
+Captured with narrow-key production candidate temporarily enabled by default.
+Reproduce with final production source:
+GOMAXPROCS=4 go test ./internal/store -run "^$" -bench "^BenchmarkDashboardQueries/rows=.*/ipindex=true$/page-" -benchtime=20x -count=1 -v -timeout=20m
+Use DASHBOARD_BENCH_WIDE_PAGE=1 for the wide-row reference with complete tie-breaking.
+
+goos: linux
+goarch: amd64
+pkg: endlessh-dashboard/internal/store
+cpu: Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz
+BenchmarkDashboardQueries
+    queries_benchmark_test.go:21: runtime=go1.26.10 GOOS=linux GOARCH=amd64 GOMAXPROCS=4
+BenchmarkDashboardQueries/rows=10000/ipindex=true
+    queries_benchmark_test.go:28: seed-ms=443.7
+    queries_benchmark_test.go:35: page-reference-wide=false
+    queries_benchmark_test.go:36: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=2781184 WAL=0
+    queries_benchmark_test.go:39: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:40: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:40: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: CO-ROUTINE page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:41: plan page-details: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: SCAN page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=? AND ip_address=?)
+    queries_benchmark_test.go:41: plan page-details: SEARCH machines USING INTEGER PRIMARY KEY (rowid=?)
+    queries_benchmark_test.go:42: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:43: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:43: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:43: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-first-90d-4         	      20	  29429566 ns/op	        26.19 first-ms	        29.70 p50-ms	        31.25 p95-ms	   87508 B/op	    1380 allocs/op
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=10000/ipindex=true/page-deep-90d-4          	      20	  63437249 ns/op	        58.57 first-ms	        59.68 p50-ms	        79.36 p95-ms	   87687 B/op	    1412 allocs/op
+    queries_benchmark_test.go:185: final DB=2781184 WAL=0
+BenchmarkDashboardQueries/rows=100000/ipindex=true
+    queries_benchmark_test.go:28: seed-ms=5884.2
+    queries_benchmark_test.go:35: page-reference-wide=false
+    queries_benchmark_test.go:36: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=28188672 WAL=0
+    queries_benchmark_test.go:39: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:40: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:40: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: CO-ROUTINE page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:41: plan page-details: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: SCAN page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=? AND ip_address=?)
+    queries_benchmark_test.go:41: plan page-details: SEARCH machines USING INTEGER PRIMARY KEY (rowid=?)
+    queries_benchmark_test.go:42: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:43: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:43: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:43: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-first-90d-4        	      20	 240396237 ns/op	       310.1 first-ms	       224.3 p50-ms	       305.9 p95-ms	   85034 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=100000/ipindex=true/page-deep-90d-4         	      20	 674555067 ns/op	       559.2 first-ms	       645.5 p50-ms	       919.2 p95-ms	   88642 B/op	    1492 allocs/op
+    queries_benchmark_test.go:185: final DB=28188672 WAL=0
+BenchmarkDashboardQueries/rows=1000000/ipindex=true
+    queries_benchmark_test.go:28: seed-ms=74105.9
+    queries_benchmark_test.go:35: page-reference-wide=false
+    queries_benchmark_test.go:36: sqlite=3.53.3 fixture: 10 machines, half rows on machine 1, 20% rows share IPs in pairs, 90-day spread, country aliases; first read=SQLite-cold/OS-cache-possible; DB=291057664 WAL=0
+    queries_benchmark_test.go:39: plan ip-update: SEARCH attackers USING INDEX idx_attackers_enrichment_ip (ip_address=?)
+    queries_benchmark_test.go:40: plan page: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:40: plan page: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: CO-ROUTINE page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:41: plan page-details: USE TEMP B-TREE FOR ORDER BY
+    queries_benchmark_test.go:41: plan page-details: SCAN page_keys
+    queries_benchmark_test.go:41: plan page-details: SEARCH attackers USING PRIMARY KEY (machine_id=? AND ip_address=?)
+    queries_benchmark_test.go:41: plan page-details: SEARCH machines USING INTEGER PRIMARY KEY (rowid=?)
+    queries_benchmark_test.go:42: plan countries: SEARCH attackers USING PRIMARY KEY (machine_id=?)
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR GROUP BY
+    queries_benchmark_test.go:42: plan countries: USE TEMP B-TREE FOR count(DISTINCT)
+    queries_benchmark_test.go:43: plan enrichment: SCAN a USING INDEX idx_attackers_missing_location
+    queries_benchmark_test.go:43: plan enrichment: SEARCH e USING PRIMARY KEY (ip_address=?) LEFT-JOIN
+    queries_benchmark_test.go:43: plan enrichment: USE TEMP B-TREE FOR ORDER BY
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-first-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-first-90d-4       	      20	2391863108 ns/op	      2332 first-ms	      2268 p50-ms	      2841 p95-ms	   85404 B/op	    1140 allocs/op
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-deep-90d
+BenchmarkDashboardQueries/rows=1000000/ipindex=true/page-deep-90d-4        	      20	5907319633 ns/op	      4579 first-ms	      5929 p50-ms	      7041 p95-ms	   89021 B/op	    1492 allocs/op
+    queries_benchmark_test.go:185: final DB=291057664 WAL=0
+PASS
+ok  	endlessh-dashboard/internal/store	294.522s
