@@ -62,11 +62,26 @@ func TestInvalidSnapshotDoesNotAdvanceHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Now().UTC()
-	initial := Snapshot{Totals: map[string]float64{}, Clients: map[string]ClientSample{}}
-	for i := 0; i < 1025; i++ {
-		initial.Totals[TotalSeriesKey(MetricOpenCountTotal, fmt.Sprint(i))] = 0
-	}
+	initial := Snapshot{Totals: map[string]float64{TotalSeriesKey(MetricOpenCountTotal, "22"): 0}, Clients: map[string]ClientSample{}}
 	if err = p.applySnapshot(ctx, machine, at, initial); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate pre-port-limit baselines rather than asking the new collector to
+	// accept an oversized scrape. The cross-port integer guard must still reject
+	// overflow against legacy state, without advancing any history or baseline.
+	tx, err := db.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 1025; i++ {
+		key := TotalSeriesKey(MetricOpenCountTotal, fmt.Sprint(i))
+		initial.Totals[key] = 0
+		if _, err = tx.ExecContext(ctx, `INSERT INTO counter_states(machine_id,series,value,updated_at) VALUES(?,?,0,?) ON CONFLICT DO NOTHING`, machine.ID, key, at.Unix()); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	before, err := db.LoadCounterStates(ctx, machine.ID)

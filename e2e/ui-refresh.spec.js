@@ -40,13 +40,16 @@ async function fixture(t, hash = '#/overview', options = {}) {
           case '/api/machines/test': body=options.probe;break;
           case '/api/settings': body={scrape_interval_seconds:300,...options.settings};break;
           case '/api/overview': body={unique_attackers: 2,countries:1,machine_count:2,trapped_now:2};break;
-          case '/api/timeseries': body=series(url.searchParams.get('machines')==='1'?333:url.searchParams.get('window')==='7d'?222:111);break;
+          case '/api/ports': body={collection_started_at:options.portRows?'2026-11-06T00:00:00Z':null,available:Boolean(options.portRows),rows:options.portRows || []};break;
+          case '/api/timeseries': body=options.portRows ? series(url.searchParams.get('port')==='22'?30:url.searchParams.get('port')==='2222'?70:url.searchParams.has('port')?0:100) : series(url.searchParams.get('machines')==='1'?333:url.searchParams.get('window')==='7d'?222:111);break;
           case '/api/attackers': body=pageData('192.0.2.2',{total:options.total??2,page:Number(url.searchParams.get('page'))||1});break;
           case '/api/attackers/countries': body=[{country:'Germany',country_key:'code:DE',country_code:'DE',count:2}];break;
           case '/api/geo/points': case '/api/geo/countries': case '/api/backups': body=[];break;
           case '/api/logout': body={};break;
           default: res.writeHead(404);res.end();return;
         }
+        if(options.portRows && url.pathname==='/api/timeseries') {for(const entry of body.series)for(const point of entry.points)point.bytes_sent=point.opens*10;}
+        if(options.portRows && url.pathname==='/api/timeseries' && url.searchParams.has('port') && !options.portRows.some(row=>row.port===url.searchParams.get('port'))) {for(const entry of body.series)for(const point of entry.points){point.available=false;point.opens=null;point.trapped_seconds=null;point.bytes_sent=null;}}
         res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(body));return;
       }
       const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -434,4 +437,29 @@ for (const state of ['inconclusive','partial','compatible']) test(`connection ev
  if(state!=='inconclusive')assert.match(await result.textContent(),/endlessh_client_open_count_total \(counter, 1 samples\)/);
  const save=f.hold(u=>u.pathname==='/api/machines'&&u.method==='POST');await f.page.locator('dialog button[type="submit"]').click();await save.seen.promise;
  await f.respond(save,{body:{id:3,name:'Fixture candidate'}});await f.page.locator('dialog').waitFor({state:'hidden'});await f.clean();
+});
+
+const portRows = [{port:'22',opens:30,closes:3,bytes_sent:300,trapped_seconds:30,observed_seconds:60,samples:2},{port:'2222',opens:70,closes:7,bytes_sent:700,trapped_seconds:70,observed_seconds:60,samples:2}];
+test('port detail: selection scopes chart and totals, preserves context and ignores stale responses',{timeout:20000},async t=>{
+ const f=await fixture(t,'#/machines/1',{portRows});await f.start();await f.page.locator('#md-port').waitFor();
+ assert.match(await f.page.locator('#md-port-totals').textContent(),/100/);assert.equal(await f.page.locator('#md-ports tbody tr').count(),2);
+ const old=f.hold(u=>u.pathname==='/api/timeseries'&&u.searchParams.get('port')==='22');
+ await f.page.locator('#md-port').selectOption('22');await old.seen.promise;
+ await f.page.locator('#md-port').selectOption('2222');await f.page.waitForFunction(()=>document.querySelector('#md-port-totals')?.textContent.includes('70'));
+ await f.respond(old,{body:series(999)});assert.equal(await f.page.locator('#md-port').inputValue(),'2222');assert.doesNotMatch(await f.page.locator('#md-port-totals').textContent(),/999/);
+ assert.match(await f.page.locator('#md-chart table').textContent(),/1m 10s recorded/);assert.match(await f.page.locator('#md-port-totals').textContent(),/700 B/);assert.match(await f.page.locator('#view h1').textContent(),/Fixture 1/);
+ assert.equal(await f.page.evaluate(()=>location.hash),'#/machines/1?port=2222');
+ await f.page.locator('#md-range [data-window="7d"]').click();await f.page.waitForFunction(()=>document.querySelector('#md-range [data-window="7d"]')?.getAttribute('aria-pressed')==='true');
+ assert.equal(await f.page.locator('#md-port').inputValue(),'2222');
+ const last=f.requests.filter(u=>u.pathname==='/api/timeseries').at(-1);assert.equal(last.searchParams.get('machines'),'1');assert.equal(last.searchParams.get('window'),'7d');assert.equal(last.searchParams.get('port'),'2222');assert.equal(f.requests.filter(u=>u.pathname==='/api/ports').at(-1).searchParams.get('as_of'),last.searchParams.get('as_of'));
+ assert.ok(f.requests.filter(u=>u.pathname==='/api/attackers').every(u=>!u.searchParams.has('port')));
+ if(process.env.UI_PORT_SCREENSHOT_PATH){await f.page.evaluate(()=>window.scrollTo(0,0));await f.page.screenshot({path:process.env.UI_PORT_SCREENSHOT_PATH+'-desktop.png',fullPage:true});}await f.clean();
+});
+test('port detail: unknown URL selection stays selected and displays unavailable at narrow width',{timeout:20000},async t=>{
+ const f=await fixture(t,'#/machines/1?port=65535',{portRows,viewport:{width:520,height:900}});await f.start();await f.page.locator('#md-port').waitFor();
+ assert.equal(await f.page.locator('#md-port').inputValue(),'65535');assert.match(await f.page.locator('#md-port-totals').textContent(),/Unavailable/);
+ assert.match(await f.page.locator('#md-chart table').textContent(),/Unavailable/);assert.equal(await f.page.locator('#md-ports th[scope="col"]').count(),6);
+ if(process.env.UI_PORT_SCREENSHOT_PATH)await f.page.screenshot({path:process.env.UI_PORT_SCREENSHOT_PATH+'-mobile.png',fullPage:true});
+ await f.page.locator('#md-port').focus();await f.page.locator('#md-port').selectOption('22');await f.page.waitForFunction(()=>document.querySelector('#md-port-totals')?.textContent.includes('30'));
+ assert.equal(await f.page.evaluate(()=>document.activeElement.id),'md-port');await f.clean();
 });

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ type latestAttackerResponse struct {
 }
 
 type seriesPointResponse struct {
+	PortScoped      bool       `json:"-"`
 	Coverage        string     `json:"coverage"`
 	ObservedSeconds float64    `json:"observed_seconds"`
 	Attempts        int64      `json:"attempts"`
@@ -54,6 +56,31 @@ type seriesPointResponse struct {
 	TrappedSeconds  float64    `json:"trapped_seconds"`
 	Opens           int64      `json:"opens"`
 	BytesSent       int64      `json:"bytes_sent"`
+}
+
+// Port history has no synthetic zero before collection or during absent samples.
+// Legacy unfiltered response fields and types are unchanged.
+func (p seriesPointResponse) MarshalJSON() ([]byte, error) {
+	type plain seriesPointResponse
+	if !p.PortScoped {
+		return json.Marshal(plain(p))
+	}
+	var opens *int64
+	var bytes *int64
+	var seconds *float64
+	available := p.Attempts > 0 || p.ObservedSeconds > 0
+	if available {
+		opens = &p.Opens
+		bytes = &p.BytesSent
+		seconds = &p.TrappedSeconds
+	}
+	return json.Marshal(struct {
+		plain
+		Available bool     `json:"available"`
+		Opens     *int64   `json:"opens"`
+		Bytes     *int64   `json:"bytes_sent"`
+		Seconds   *float64 `json:"trapped_seconds"`
+	}{plain(p), available, opens, bytes, seconds})
 }
 
 type seriesResponse struct {
@@ -165,6 +192,10 @@ func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) handleTimeSeries(writer http.ResponseWriter, request *http.Request) {
+	port, ok := readPort(writer, request)
+	if !ok {
+		return
+	}
 	machines, err := s.resolveMachines(request)
 	if err != nil {
 		s.logger.Error("resolve machines", "error", err)
@@ -178,7 +209,12 @@ func (s *Server) handleTimeSeries(writer http.ResponseWriter, request *http.Requ
 	}
 	from, to := span.From, span.To
 
-	series, err := s.store.TimeSeries(request.Context(), machines, from, to, bucketSeconds)
+	var series []store.MachineSeries
+	if port != "" {
+		series, err = s.store.TimeSeriesForPort(request.Context(), machines, from, to, bucketSeconds, port)
+	} else {
+		series, err = s.store.TimeSeries(request.Context(), machines, from, to, bucketSeconds)
+	}
 	if err != nil {
 		s.logger.Error("time series", "error", err)
 		writeError(writer, http.StatusInternalServerError, "could not load the chart data")
@@ -195,7 +231,8 @@ func (s *Server) handleTimeSeries(writer http.ResponseWriter, request *http.Requ
 		points := make([]seriesPointResponse, 0, len(machineSeries.Points))
 		for _, point := range machineSeries.Points {
 			points = append(points, seriesPointResponse{
-				At: point.At, To: point.To, Partial: point.Partial,
+				PortScoped: port != "",
+				At:         point.At, To: point.To, Partial: point.Partial,
 				Coverage: point.Coverage, ObservedSeconds: point.ObservedSeconds, Attempts: point.Attempts, Successes: point.Successes, UncertainFrom: point.UncertainFrom, UncertainTo: point.UncertainTo,
 				TrappedSeconds: point.TrappedSeconds,
 				Opens:          point.Opens,

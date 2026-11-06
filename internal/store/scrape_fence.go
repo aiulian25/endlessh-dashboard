@@ -12,14 +12,15 @@ import (
 var ErrObsoleteScrape = errors.New("obsolete scrape discarded")
 
 type ScrapeState struct {
-	Cadence            time.Duration
-	Counters           map[string]float64
-	Revision           int64
-	Policy             string
-	CounterTimes       map[string]time.Time
-	PreviousSample     *time.Time
-	CoverageGeneration *int64
-	Failures           int
+	PortCollectionStarted bool
+	Cadence               time.Duration
+	Counters              map[string]float64
+	Revision              int64
+	Policy                string
+	CounterTimes          map[string]time.Time
+	PreviousSample        *time.Time
+	CoverageGeneration    *int64
+	Failures              int
 }
 
 // LoadScrapeState reads a consistent baseline and revision. A competing result
@@ -32,7 +33,7 @@ func (s *Store) LoadScrapeState(ctx context.Context, machine Machine) (ScrapeSta
 	defer tx.Rollback()
 	state := ScrapeState{Counters: map[string]float64{}, CounterTimes: map[string]time.Time{}}
 	var previousNS, generation, cadence sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT scrape_revision,client_counter_policy,consecutive_failures,c.sample_ns,c.generation,c.cadence_ns FROM machines m LEFT JOIN scrape_coverage_state c ON c.machine_id=m.id WHERE m.id=? AND target_generation=? AND enabled=1`, machine.ID, machine.TargetGeneration).Scan(&state.Revision, &state.Policy, &state.Failures, &previousNS, &generation, &cadence)
+	err = tx.QueryRowContext(ctx, `SELECT scrape_revision,client_counter_policy,consecutive_failures,c.sample_ns,c.generation,c.cadence_ns,EXISTS(SELECT 1 FROM port_collection p WHERE p.machine_id=m.id AND p.generation=m.target_generation) FROM machines m LEFT JOIN scrape_coverage_state c ON c.machine_id=m.id WHERE m.id=? AND target_generation=? AND enabled=1`, machine.ID, machine.TargetGeneration).Scan(&state.Revision, &state.Policy, &state.Failures, &previousNS, &generation, &cadence, &state.PortCollectionStarted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScrapeState{}, ErrObsoleteScrape
 	}

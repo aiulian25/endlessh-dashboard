@@ -2,12 +2,12 @@ import { updateWithFocus } from './focus.js';
 import { attackerHash } from './navigation.js';
 import { latestRequests, isAbortError } from './requests.js';
 import { activityNote, CUMULATIVE_NOTE, CONNECTION_TIME_NOTE } from './metric-notes.js';
-import { rangeParams } from './time-range.js';
+import { rangeParams, seriesTotals } from './time-range.js';
 /* Machines page: registry table, add/edit/delete dialogs, and a per-machine drill-down. */
 
 import {
   api, qs, esc, icon, toast, onRefresh, renderError, emptyState, openModal, confirmModal,
-  fmtDuration, fmtNumber, fmtRelative, fmtDateTime,
+  fmtDuration, fmtNumber, fmtRelative, fmtDateTime, fmtBytes,
   loadMachines, currentMachines, statusBadge, statusDot, navigate,
   getWindow, setWindow, WINDOWS, STATUS_DOWN,
   MACHINE_PALETTE_SIZE,
@@ -348,7 +348,8 @@ async function renderList(mount, routeSignal) {
 
 /* ---------------- drill-down ---------------- */
 
-async function renderDetail(mount, id, routeSignal) {
+async function renderDetail(mount, id, routeSignal, query) {
+ let selectedPort = query?.get('port') || '';
   const requests = latestRequests(routeSignal);
   mount.innerHTML = `
     <h1 class="sr-only">Machine details</h1>
@@ -374,14 +375,20 @@ async function renderDetail(mount, id, routeSignal) {
       }
 
       const params = { machines: String(id), ...rangeParams(windowValue) };
-      const [timeseries, attackers] = await Promise.all([
-        api('/timeseries' + qs(params), { signal: request.signal }),
+      const [timeseries, attackers, ports] = await Promise.all([
+        api('/timeseries' + qs({...params,...(selectedPort ? {port:selectedPort} : {})}), { signal: request.signal }),
         api('/attackers' + qs({ ...params, sort: 'trapped_seconds', order: 'desc', page: 1, per_page: DRILL_ROWS }), { signal: request.signal }),
+        api('/ports' + qs(params), {signal:request.signal}),
       ]);
 
       if (!request.isCurrent()) return;
       updateWithFocus(mount, () => {
       if (!request.isCurrent()) return;
+      const portRows = ports.rows || [];
+      const values = seriesTotals(timeseries);
+      const available = !selectedPort || portRows.some(row => row.port === selectedPort);
+      const portLabel = value => value === 'unknown' ? 'Unlabelled' : value;
+      const options = [...new Set([...portRows.map(row => row.port), ...(selectedPort ? [selectedPort] : [])])];
       mount.innerHTML = `
         <div class="page-head">
           <a href="#/machines" class="btn btn-ghost btn-sm">${icon('chevronLeft', 14)} All machines</a>
@@ -395,22 +402,34 @@ async function renderDetail(mount, id, routeSignal) {
         ${machine.last_error ? `<div class="alert" role="status">${icon('alert', 18)}<span>${esc(machine.last_error)}</span></div>` : ''}
         <p class="filters-note">${esc(activityNote(machine.activity_threshold_seconds))} Last successful scrape: ${esc(fmtRelative(machine.last_ok_at))}; dates use UTC. ${esc(CONNECTION_TIME_NOTE)}</p>
         <div class="grid-stats">
-          <div class="card stat"><span class="stat-label">Recently active IPs</span><span class="stat-value amber">${esc(fmtNumber(machine.trapped_now))}</span><span class="stat-delta neutral">positive sampled growth</span></div>
+          <div class="card stat"><span class="stat-label">Recently active IPs (all ports)</span><span class="stat-value amber">${esc(fmtNumber(machine.trapped_now))}</span><span class="stat-delta neutral">positive sampled growth</span></div>
           <div class="card stat"><span class="stat-label">Last scrape</span><span class="stat-value">${esc(fmtRelative(machine.last_scrape_at))}</span><span class="stat-delta neutral">${esc(fmtDateTime(machine.last_scrape_at))}</span></div>
           <div class="card stat"><span class="stat-label">Last success</span><span class="stat-value">${esc(fmtRelative(machine.last_ok_at))}</span><span class="stat-delta neutral">${esc(fmtNumber(machine.consecutive_failures))} failures in a row</span></div>
           <div class="card stat"><span class="stat-label">Group</span><span class="stat-value">${esc(machine.group_label || '—')}</span><span class="stat-delta neutral">${machine.enabled ? 'Scraping enabled' : 'Scraping disabled'}</span></div>
         </div>
+        <div class="grid-stats grid-stats-3" id="md-port-totals" aria-label="Recorded window subtotals">
+          <div class="card stat"><span class="stat-label">${selectedPort ? `Port ${esc(portLabel(selectedPort))}` : 'All ports'} · connection opens</span><span class="stat-value">${available ? esc(fmtNumber(values.opens)) : 'Unavailable'}</span></div>
+          <div class="card stat"><span class="stat-label">Sampled connection time</span><span class="stat-value">${available ? esc(fmtDuration(values.trapped_seconds)) : 'Unavailable'}</span></div>
+          <div class="card stat"><span class="stat-label">Bytes sent</span><span class="stat-value">${available ? esc(fmtBytes(values.bytes_sent)) : 'Unavailable'}</span></div>
+        </div>
+        <div class="card" id="md-ports">
+          <div class="card-head"><h2 class="card-title">Ports</h2></div>
+          <p class="filters-note card-pad">${ports.collection_started_at ? `Port collection began ${esc(fmtDateTime(ports.collection_started_at))}.` : 'No per-port samples collected yet.'} Older merged history cannot be split into ports. Values are recorded window subtotals; missing samples, resets and gaps are not confirmed zeroes. History includes retained endpoint generations.</p>
+          ${portRows.length ? `<div class="table-wrap"><table class="tbl"><caption class="sr-only">Recorded per-port window subtotals</caption><thead><tr><th scope="col">Port</th><th scope="col">Connection opens</th><th scope="col">Connection closes</th><th scope="col">Sampled time</th><th scope="col">Bytes sent</th><th scope="col">Observed time</th></tr></thead><tbody>${portRows.map(row => `<tr><th scope="row">${esc(portLabel(row.port))}</th><td>${esc(fmtNumber(row.opens))}</td><td>${esc(fmtNumber(row.closes))}</td><td>${esc(fmtDuration(row.trapped_seconds))}</td><td>${esc(fmtBytes(row.bytes_sent))}</td><td>${esc(fmtDuration(row.observed_seconds))} · ${esc(fmtNumber(row.samples))} samples</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty-text">Per-port data unavailable for this range.</p>'}
+        </div>
         <div class="card card-pad">
           <div class="card-head flush">
             <h2 class="card-title">Sampled connection time</h2>
+            <label class="field-label" for="md-port">Port</label><select id="md-port" class="select select-inline" aria-label="Tarpit port"><option value="">All ports</option>${options.map(port => `<option value="${esc(port)}" ${port===selectedPort ? 'selected' : ''}>${esc(portLabel(port))}</option>`).join('')}</select>
             <div class="legend" id="md-legend"></div>
             <div class="seg" id="md-range" role="group" aria-label="Time range"></div>
           </div>
+          ${selectedPort && !available ? '<p class="filters-note" role="status">Port data unavailable for this range; no recorded port observations are available.</p>' : ''}
           <div id="md-chart"></div>
         </div>
         <div class="card">
           <div class="card-head">
-            <h2 class="card-title">Cumulative IP rows on this machine</h2>
+            <h2 class="card-title">Cumulative IP rows on this machine (all ports)</h2>
             <a href="${esc(attackerHash({}, String(id), windowValue))}">View all ${esc(fmtNumber(attackers.total))} rows</a>
           </div>
           <p class="filters-note card-pad">${esc(CUMULATIVE_NOTE)} ${esc(CONNECTION_TIME_NOTE)}</p>
@@ -421,6 +440,11 @@ async function renderDetail(mount, id, routeSignal) {
       renderChart(mount.querySelector('#md-chart'), timeseries, { label: `Sampled connection time (connection-seconds) on ${machine.name}`, format: fmtDuration });
       renderAttackersTable(mount.querySelector('#md-table'), attackers.rows || [], { columns: DRILL_COLUMNS });
 
+      mount.querySelector('#md-port').addEventListener('change', event => {
+        selectedPort = event.target.value;
+        history.replaceState(history.state,'',`#/machines/${id}${selectedPort ? `?port=${encodeURIComponent(selectedPort)}` : ''}`);
+        load();
+      });
       const rangeHost = mount.querySelector('#md-range');
       rangeHost.innerHTML = WINDOWS.map((value) => `
         <button type="button" data-window="${value}" aria-pressed="${value === windowValue}">${value}</button>`).join('');
@@ -443,8 +467,8 @@ async function renderDetail(mount, id, routeSignal) {
   await load();
 }
 
-export async function render(mount, param, routeSignal) {
+export async function render(mount, param, routeSignal, query) {
   const id = Number(param);
-  if (Number.isFinite(id) && param) await renderDetail(mount, id, routeSignal);
+  if (Number.isFinite(id) && param) await renderDetail(mount, id, routeSignal, query);
   else await renderList(mount, routeSignal);
 }

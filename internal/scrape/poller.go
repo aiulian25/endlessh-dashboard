@@ -376,31 +376,47 @@ func (p *Poller) applySnapshot(ctx context.Context, machine store.Machine, at ti
 	current := make(map[string]float64, len(snapshot.Totals)+2*len(snapshot.Clients))
 	delta := store.ScrapeDelta{MachineID: machine.ID, At: at, TargetGeneration: machine.TargetGeneration, Revision: &state.Revision}
 
+	ports := map[string]*store.PortDelta{}
 	for key, value := range snapshot.Totals {
 		current[key] = value
 		change := counterDelta(previous, key, value)
+		port := portOfTotal(key)
+		if ports[port] == nil {
+			ports[port] = &store.PortDelta{Port: port}
+		}
+		pd := ports[port]
 		switch {
 		case isTotalSeries(key, MetricOpenCountTotal):
+			pd.Opens = int64(change)
 			delta.Opens, err = metricvalue.AddInt(delta.Opens, int64(change))
 			if err != nil {
 				return err
 			}
 		case isTotalSeries(key, MetricClosedCountTotal):
+			pd.Closes = int64(change)
 			delta.Closes, err = metricvalue.AddInt(delta.Closes, int64(change))
 			if err != nil {
 				return err
 			}
 		case isTotalSeries(key, MetricSentBytesTotal):
+			pd.BytesSent = int64(change)
 			delta.BytesSent, err = metricvalue.AddInt(delta.BytesSent, int64(change))
 			if err != nil {
 				return err
 			}
 		case isTotalSeries(key, MetricTrappedTimeSecondsTotal):
+			pd.TrappedSeconds = change
 			delta.TrappedSeconds, err = metricvalue.AddFloat(delta.TrappedSeconds, change)
 			if err != nil {
 				return err
 			}
 		}
+	}
+
+	delta.Ports = make([]store.PortDelta, 0, len(ports))
+	for port, pd := range ports {
+		pd.Coverage = portObservationCoverage(state, machine, at, snapshot, port, 2*p.interval)
+		delta.Ports = append(delta.Ports, *pd)
 	}
 
 	policy := state.Policy

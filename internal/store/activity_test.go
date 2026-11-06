@@ -35,7 +35,7 @@ func TestLegacyObservationMigrationDoesNotInventActivity(t *testing.T) {
 	ctx := context.Background()
 	applyScrape(t, s, ScrapeDelta{MachineID: m.ID, At: baseTime, Attackers: []AttackerDelta{{IPAddress: "192.0.2.1", Connections: 10}}})
 	applyScrape(t, s, ScrapeDelta{MachineID: m.ID, At: baseTime, Attackers: []AttackerDelta{{IPAddress: "192.0.2.2", Connections: 2, Active: true}}})
-	if _, err := s.DB().Exec(`DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11; DROP TABLE attacker_ip_archive; DROP TABLE counter_ip_archive; DELETE FROM schema_migrations WHERE version=10; DROP INDEX idx_attackers_measured_activity;
+	if _, err := s.DB().Exec(`DROP TABLE port_rollups; DROP TABLE port_collection; DELETE FROM schema_migrations WHERE version=13; DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11; DROP TABLE attacker_ip_archive; DROP TABLE counter_ip_archive; DELETE FROM schema_migrations WHERE version=10; DROP INDEX idx_attackers_measured_activity;
  ALTER TABLE attackers DROP COLUMN last_observed_at;
  ALTER TABLE attackers DROP COLUMN last_measured_activity_at;
  ALTER TABLE attackers DROP COLUMN has_undated_history;

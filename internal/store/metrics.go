@@ -42,6 +42,7 @@ type ScrapeDelta struct {
 	Revision       *int64
 	At             time.Time
 	Coverage       *ScrapeCoverage
+	Ports          []PortDelta
 	Opens          int64
 	Closes         int64
 	BytesSent      int64
@@ -111,6 +112,9 @@ func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 		return err
 	}
 	if err := validateScrapeNumbers(delta); err != nil {
+		return err
+	}
+	if err := validatePorts(delta); err != nil {
 		return err
 	}
 	transaction, err := s.database.BeginTx(ctx, nil)
@@ -204,6 +208,9 @@ func (s *Store) ApplyScrape(ctx context.Context, delta ScrapeDelta) error {
 		if err := saveScrapeCoverage(ctx, transaction, delta); err != nil {
 			return err
 		}
+	}
+	if err := savePortRollups(ctx, transaction, delta); err != nil {
+		return err
 	}
 	return transaction.Commit()
 }

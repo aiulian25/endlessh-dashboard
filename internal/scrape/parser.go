@@ -15,6 +15,7 @@ import (
 	"endlessh-dashboard/internal/geo"
 	"endlessh-dashboard/internal/ipidentity"
 	"endlessh-dashboard/internal/metricvalue"
+	"endlessh-dashboard/internal/store"
 )
 
 // The six metrics endlessh-go exposes. The four *_total counters are labelled
@@ -140,6 +141,7 @@ func Parse(reader io.Reader) (Snapshot, error) {
 		ClientSeries:   map[string]RawClientSample{},
 	}
 
+	ports := map[string]bool{}
 	for _, metricName := range []string{
 		MetricOpenCountTotal,
 		MetricClosedCountTotal,
@@ -152,6 +154,14 @@ func Parse(reader io.Reader) (Snapshot, error) {
 		}
 		for _, metric := range family.GetMetric() {
 			labels := labelMap(metric)
+			port, err := store.PortFromLabel(labels[LabelLocalPort])
+			if err != nil {
+				return Snapshot{}, fmt.Errorf("metric %s: %w", metricName, err)
+			}
+			ports[port] = true
+			if len(ports) > store.MaxScrapePorts {
+				return Snapshot{}, fmt.Errorf("too many local ports (maximum %d)", store.MaxScrapePorts)
+			}
 			key := TotalSeriesKey(metricName, labels[LabelLocalPort])
 			snapshot.Totals[key] += sampleValue(metric)
 		}

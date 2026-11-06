@@ -630,6 +630,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
    address and a country name without wrapping into a wall of text. */
 /* The last card holds an address rather than a number, so it takes a little
    more of the row than its five neighbours and keeps it on one line. */
+.grid-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid-stats-6 { grid-template-columns: repeat(5, minmax(0, 1fr)) minmax(0, 1.35fr); gap: 12px; }
 .grid-stats-6 .stat { padding: 14px 16px; gap: 3px; }
 .grid-stats-6 .stat-label { font-size: 11px; }

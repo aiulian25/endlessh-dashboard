@@ -281,6 +281,16 @@ func (s *Store) TrappedNowByMachine(ctx context.Context, activeSince time.Time) 
 // TimeSeries returns one dense series per machine: every series carries the same
 // bucket timestamps, with zero-filled gaps, so the chart can stack them directly.
 func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to time.Time, bucketSeconds int) ([]MachineSeries, error) {
+	return s.timeSeries(ctx, machines, from, to, bucketSeconds, "")
+}
+
+func (s *Store) TimeSeriesForPort(ctx context.Context, machines []Machine, from, to time.Time, bucketSeconds int, port string) ([]MachineSeries, error) {
+	if err := ValidatePort(port); err != nil {
+		return nil, err
+	}
+	return s.timeSeries(ctx, machines, from, to, bucketSeconds, port)
+}
+func (s *Store) timeSeries(ctx context.Context, machines []Machine, from, to time.Time, bucketSeconds int, port string) ([]MachineSeries, error) {
 	if len(machines) == 0 || bucketSeconds <= 0 {
 		return nil, nil
 	}
@@ -299,6 +309,11 @@ func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to tim
 	from, to = span.From, span.To
 	firstBucket := from.Unix() / int64(bucketSeconds) * int64(bucketSeconds)
 	args := append(int64Args(machineIDs), from.Unix(), to.Unix())
+	table, coverageTable, portWhere := "machine_rollups", "scrape_coverage", ""
+	if port != "" {
+		table, coverageTable, portWhere = "port_rollups", "port_rollups", " AND port=?"
+		args = append(args, port)
+	}
 	tx, err := s.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -308,8 +323,8 @@ func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to tim
 		`SELECT machine_id,
 				bucket / ? * ? AS aligned,
 				SUM(trapped_seconds), SUM(opens), SUM(bytes_sent)
-		 FROM machine_rollups
-		 WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket >= ? AND bucket < ?
+		 FROM `+table+`
+		 WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket >= ? AND bucket < ?`+portWhere+`
 		 GROUP BY machine_id, aligned`,
 		append([]any{bucketSeconds, bucketSeconds}, args...)...)
 	if err != nil {
@@ -339,7 +354,7 @@ func (s *Store) TimeSeries(ctx context.Context, machines []Machine, from, to tim
 
 	rows.Close()
 	coverageRows, err := tx.QueryContext(ctx, `SELECT machine_id,bucket / ? * ?,SUM(covered_seconds),SUM(attempts),SUM(successes),MIN(uncertain_from),MAX(uncertain_to)
- FROM scrape_coverage WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket>=? AND bucket<? GROUP BY machine_id,bucket / ?`, append(append([]any{bucketSeconds, bucketSeconds}, args...), bucketSeconds)...)
+ FROM `+coverageTable+` WHERE machine_id IN (`+placeholders(len(machineIDs))+`) AND bucket>=? AND bucket<?`+portWhere+` GROUP BY machine_id,bucket / ?`, append(append([]any{bucketSeconds, bucketSeconds}, args...), bucketSeconds)...)
 	if err != nil {
 		return nil, err
 	}

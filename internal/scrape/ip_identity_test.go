@@ -97,7 +97,7 @@ func TestLegacyIPCollisionRebaselinesWithoutLifetimeImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.DB().Exec(`DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11; DROP TABLE attacker_ip_archive;DROP TABLE counter_ip_archive;DELETE FROM schema_migrations WHERE version=10`); err != nil {
+	if _, err = db.DB().Exec(`DROP TABLE port_rollups; DROP TABLE port_collection; DELETE FROM schema_migrations WHERE version=13; DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11; DROP TABLE attacker_ip_archive;DROP TABLE counter_ip_archive;DELETE FROM schema_migrations WHERE version=10`); err != nil {
 		t.Fatal(err)
 	}
 	for _, ip := range []string{"2001:0DB8::1", "2001:db8::1"} {

@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/timeseries", s.protected(s.handleTimeSeries))
 	mux.Handle("GET /api/attackers", s.protected(s.handleAttackers))
 	mux.Handle("GET /api/attackers/countries", s.protected(s.handleAttackerCountries))
+	mux.Handle("GET /api/ports", s.protected(s.handlePortSummary))
 	mux.Handle("GET /api/geo/points", s.protected(s.handleGeoPoints))
 	mux.Handle("GET /api/geo/countries", s.protected(s.handleGeoCountries))
 

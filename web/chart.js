@@ -142,8 +142,8 @@ export function renderChart(host, data, options = {}) {
   const stride = Math.max(1, Math.ceil(count / SR_ROW_LIMIT));
   const srRows = [];
   for (let i = 0; i < count; i += stride) {
-    const cells = series.map((entry, s) => `<td>${esc(format(values[s][i]))} recorded; ${esc(coverageDescription(entry.points[i]))}</td>`).join('');
-    srRows.push(`<tr><th scope="row">${esc(interval(i))}</th>${cells}<td>${esc(format(total[i]))}</td></tr>`);
+    const cells = series.map((entry, s) => `<td>${entry.points[i]?.available === false ? 'Unavailable' : esc(format(values[s][i])) + ' recorded'}; ${esc(coverageDescription(entry.points[i]))}</td>`).join('');
+    srRows.push(`<tr><th scope="row">${esc(interval(i))}</th>${cells}<td>${series.every(entry => entry.points[i]?.available === false) ? 'Unavailable' : esc(format(total[i]))}</td></tr>`);
   }
 
   host.innerHTML = `
@@ -182,14 +182,14 @@ export function renderChart(host, data, options = {}) {
       <div class="chart-tip-row">
         <span class="legend-swatch ${esc(seriesClass(entry, s))}"></span>
         <span class="chart-tip-name">${esc(entry.machine_name)}</span>
-        <span class="chart-tip-val">${entry.points[index]?.coverage !== 'complete' && values[s][index] === 0 ? '— (recorded 0)' : esc(format(values[s][index]))}</span>
+        <span class="chart-tip-val">${entry.points[index]?.available === false ? 'Unavailable' : entry.points[index]?.coverage !== 'complete' && values[s][index] === 0 ? '— (recorded 0)' : esc(format(values[s][index]))}</span>
       </div><div class="chart-coverage-note">${esc(coverageDescription(entry.points[index]))}</div>`).join('');
     tip.innerHTML = `
       <div class="chart-tip-time">${esc(interval(index))}</div>
       ${rows}
       <div class="chart-tip-row chart-tip-total">
         <span class="chart-tip-name">Recorded subtotal</span>
-        <span class="chart-tip-val">${esc(format(total[index]))}</span>
+        <span class="chart-tip-val">${series.every(entry => entry.points[index]?.available === false) ? 'Unavailable' : esc(format(total[index]))}</span>
       </div>`;
     tip.hidden = false;
 

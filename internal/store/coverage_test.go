@@ -13,7 +13,7 @@ func TestCoverageMigrationRestartRetentionAndFencing(t *testing.T) {
 	ctx := context.Background()
 	start := baseTime.Truncate(time.Minute)
 	applyScrape(t, s, ScrapeDelta{MachineID: m.ID, At: start, Opens: 12, TrappedSeconds: 90})
-	if _, err := s.DB().Exec(`DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11`); err != nil {
+	if _, err := s.DB().Exec(`DROP TABLE port_rollups; DROP TABLE port_collection; DELETE FROM schema_migrations WHERE version=13; DROP TRIGGER enrichment_progress_last_copy_deleted; DROP TABLE enrichment_progress; DROP INDEX idx_attackers_enrichment_ip; DELETE FROM schema_migrations WHERE version=12; DROP TABLE scrape_coverage; DROP TABLE scrape_coverage_state; DELETE FROM schema_migrations WHERE version=11`); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

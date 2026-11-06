@@ -14,6 +14,7 @@ const (
 )
 
 type PruneStats struct {
+	PortRollups   int64
 	Coverage      int64
 	Rollups       int64
 	Attackers     int64
@@ -51,6 +52,7 @@ func (s *Store) Prune(ctx context.Context, cutoff time.Time) (PruneStats, error)
 		args   []any
 		count  *int64
 	}{
+		{"port rollups", "DELETE FROM port_rollups WHERE bucket < ?", []any{cutoffUnix}, &stats.PortRollups},
 		{"coverage", "DELETE FROM scrape_coverage WHERE bucket < ?", []any{cutoffUnix}, &stats.Coverage},
 		{"rollups", "DELETE FROM machine_rollups WHERE bucket < ?", []any{cutoffUnix}, &stats.Rollups},
 		{"attackers", "DELETE FROM attackers WHERE COALESCE(last_measured_activity_at,first_seen) < ?", []any{cutoffUnix}, &stats.Attackers},
