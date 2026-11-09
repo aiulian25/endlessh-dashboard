@@ -109,6 +109,30 @@ func TestClientPresenceAndConflictingDuplicates(t *testing.T) {
 	}
 }
 
+// A failed GeoIP lookup gives one IP a second open_count counter under the
+// placeholder geography; both are real connections. Taken from a live tarpit,
+// where one address was published under Unknown and under its country at once.
+func TestGeographySplitCountersAreAdded(t *testing.T) {
+	located := `endlessh_client_open_count{country="Poland",geohash="u3qbz4z8d",ip="195.3.220.7",local_port="2222",location="Poland, Mazovia, Warsaw"} 3`
+	unknown := `endlessh_client_open_count{country="Unknown",geohash="s000",ip="195.3.220.7",local_port="2222",location="Unknown"} 1`
+	for _, payload := range []string{located + "\n" + unknown + "\n", unknown + "\n" + located + "\n"} {
+		s, err := Parse(strings.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := s.ClientSeries[RawClientSeriesKey(MetricClientOpenCount, "195.3.220.7", "2222")].Value; got != 4 {
+			t.Fatalf("raw series = %g, want 4", got)
+		}
+		client := s.Clients["195.3.220.7"]
+		if client.Connections != 4 || client.Country != "Poland" {
+			t.Fatalf("client = %+v", client)
+		}
+	}
+	if _, err := Parse(strings.NewReader(located + "\n" + strings.Replace(located, "} 3", "} 5", 1) + "\n")); err == nil {
+		t.Fatal("conflicting copy of one geography accepted")
+	}
+}
+
 func TestLegacyClientBaselinesUpgradeWithoutLifetimeReimport(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

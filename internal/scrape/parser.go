@@ -91,6 +91,15 @@ func RawClientSeriesKey(metric, ip, port string) string {
 	return ipidentity.RawKey(metric, ip, port)
 }
 
+// clientCounterIdentity tells repeated client lines apart from separate counters.
+// endlessh-go labels open_count with the geography it resolved at connection
+// time, so an IP whose lookup failed once ("Unknown") and succeeded later has
+// two genuine counters that add up. Address aliases and any other label still
+// collapse to one identity, where only identical values are accepted.
+func clientCounterIdentity(rawKey string, labels map[string]string) string {
+	return rawKey + "|" + labels[LabelCountry] + "|" + labels[LabelLocation] + "|" + labels[LabelGeohash]
+}
+
 // TotalSeriesKey identifies an aggregate counter for one local port.
 func TotalSeriesKey(metric, localPort string) string {
 	return "total:" + metric + "|" + localPort
@@ -167,6 +176,8 @@ func Parse(reader io.Reader) (Snapshot, error) {
 		}
 	}
 
+	counterValues := map[string]float64{}
+
 	if family, ok := families[MetricClientOpenCount]; ok {
 		for _, metric := range family.GetMetric() {
 			labels := labelMap(metric)
@@ -176,14 +187,16 @@ func Parse(reader io.Reader) (Snapshot, error) {
 			}
 
 			key := RawClientSeriesKey(MetricClientOpenCount, ipAddress, labels[LabelLocalPort])
+			identity := clientCounterIdentity(key, labels)
 			value := sampleValue(metric)
-			if existing, ok := snapshot.ClientSeries[key]; ok {
-				if existing.Value != value {
+			if existing, ok := counterValues[identity]; ok {
+				if existing != value {
 					return Snapshot{}, fmt.Errorf("conflicting duplicate client series")
 				}
 				continue
 			}
-			snapshot.ClientSeries[key] = RawClientSample{Metric: MetricClientOpenCount, IPAddress: ipAddress, LocalPort: labels[LabelLocalPort], Value: value}
+			counterValues[identity] = value
+			snapshot.ClientSeries[key] = RawClientSample{Metric: MetricClientOpenCount, IPAddress: ipAddress, LocalPort: labels[LabelLocalPort], Value: snapshot.ClientSeries[key].Value + value}
 			sample := snapshot.Clients[ipAddress]
 			sample.IPAddress = ipAddress
 			sample.Connections += sampleValue(metric)
@@ -201,14 +214,16 @@ func Parse(reader io.Reader) (Snapshot, error) {
 			}
 
 			key := RawClientSeriesKey(MetricClientTrappedTimeSeconds, ipAddress, labels[LabelLocalPort])
+			identity := clientCounterIdentity(key, labels)
 			value := sampleValue(metric)
-			if existing, ok := snapshot.ClientSeries[key]; ok {
-				if existing.Value != value {
+			if existing, ok := counterValues[identity]; ok {
+				if existing != value {
 					return Snapshot{}, fmt.Errorf("conflicting duplicate client series")
 				}
 				continue
 			}
-			snapshot.ClientSeries[key] = RawClientSample{Metric: MetricClientTrappedTimeSeconds, IPAddress: ipAddress, LocalPort: labels[LabelLocalPort], Value: value}
+			counterValues[identity] = value
+			snapshot.ClientSeries[key] = RawClientSample{Metric: MetricClientTrappedTimeSeconds, IPAddress: ipAddress, LocalPort: labels[LabelLocalPort], Value: snapshot.ClientSeries[key].Value + value}
 			sample := snapshot.Clients[ipAddress]
 			sample.IPAddress = ipAddress
 			sample.TrappedSeconds += sampleValue(metric)
