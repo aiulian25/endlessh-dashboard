@@ -868,7 +868,9 @@ local port before their deltas are added to the existing per-machine/IP history.
 are not zero readings: only present raw series update baselines. An unchanged series returning
 within baseline retention contributes zero; a lower returning value is treated as an observed
 reset. Identical duplicate series are counted once; conflicting values for the same identity
-reject the whole scrape. Raw baseline keys and attacker rows use the same validated, canonical IP identity.
+reject the whole scrape. Series that differ only in geography are separate counters and are
+added: endlessh-go labels each connection with the location it resolved at the time, so an IP
+whose lookup failed once is published under `Unknown` and under its country. Raw baseline keys and attacker rows use the same validated, canonical IP identity.
 
 Migration **0007** adds the durable `machines.client_counter_policy` setting and leaves recorded
 totals, attacker rows, rollups and old baseline values intact. Existing machines use
@@ -1532,10 +1534,10 @@ the patched compiler. This compiler update changes no database schema or configu
 
 ## Versions and upgrading
 
-The versioned reference for this release is `ghcr.io/aiulian25/endlessh-dashboard:1.5.0`:
+The versioned reference for this release is `ghcr.io/aiulian25/endlessh-dashboard:1.5.1`:
 
 ```yaml
-image: ghcr.io/aiulian25/endlessh-dashboard:1.5.0
+image: ghcr.io/aiulian25/endlessh-dashboard:1.5.1
 ```
 
 The quick start references `ghcr.io/aiulian25/endlessh-dashboard:latest`, a mutable tag. Verify
